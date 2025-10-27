@@ -1,0 +1,46 @@
+# Build artifacts
+*.o
+*.so
+*.a
+*.out
+*.exe
+
+# Executables
+server
+client
+bridge
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# Core dumps
+core
+core.*
+
+# Performance data
+*.csv
+*.perf
+perf.data*
+flamegraph*.svg
+
+# Results directories
+results*/
+*results*/
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Dependencies
+*.d
+
+# Temporary files
+*.tmp
+*.log
