@@ -8,12 +8,14 @@ objmapper is a high-performance object storage system designed to serve as a ste
 
 ## Features
 
-- **Zero-Copy Delivery**: File descriptor passing eliminates data copying
+- **Multiple Transport Types**: Unix sockets (primary), TCP, and UDP
+- **Zero-Copy Delivery**: File descriptor passing eliminates data copying (Unix sockets)
 - **Multiple Transfer Modes**: FD passing, traditional copy, and kernel splice
 - **URI-Based Dictionary**: Fast hash-based object lookup
 - **Memory-Mapped Caching**: Configurable cache with automatic management
 - **Thread-Safe**: Concurrent access with reader-writer locks
 - **Clean Modular Design**: Well-defined internal APIs and interfaces
+- **Capability Detection**: Automatic validation of transport-mode compatibility
 - **Varnish Integration**: Designed as a stevedore backend for Varnish Cache
 
 ## Architecture
@@ -21,14 +23,18 @@ objmapper is a high-performance object storage system designed to serve as a ste
 ```
 lib/
 ├── fdpass/      - File descriptor passing over Unix sockets
-└── storage/     - Object storage with URI dictionary and caching
+├── storage/     - Object storage with URI dictionary and caching
+└── transport/   - Multi-transport abstraction (Unix/TCP/UDP)
 
 objmapper/
 ├── include/     - Public API headers
 └── src/         - Server and client implementations
 ```
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed architecture documentation.
+See documentation:
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) - Overall system architecture
+- [docs/TRANSPORT.md](docs/TRANSPORT.md) - Transport abstraction layer
+- [docs/REFACTORING.md](docs/REFACTORING.md) - Modular refactoring details
 
 ## Building
 
@@ -48,40 +54,84 @@ Built artifacts are placed in `build/`:
 
 ### Starting the Server
 
+#### Unix Socket Mode (Primary - supports FD passing)
 ```bash
-./build/objmapper-server -b /path/to/backing/dir \
-                         -c /path/to/cache/dir \
-                         -l 1073741824 \
-                         -s /tmp/objmapper.sock
+./build/objmapper-server -t unix -s /tmp/objmapper.sock -b /data
 ```
 
-Options:
+#### TCP Mode (Network - copy/splice only)
+```bash
+./build/objmapper-server -t tcp -H 0.0.0.0 -p 9999 -b /data
+```
+
+#### UDP Mode (Experimental)
+```bash
+./build/objmapper-server -t udp -H 0.0.0.0 -p 9998 -b /data
+```
+
+Server Options:
+- `-t TYPE` - Transport type: unix (default), tcp, udp
+- `-s PATH` - Unix socket path (default: /tmp/objmapper.sock)
+- `-H HOST` - Host for TCP/UDP (default: *)
+- `-p PORT` - Port for TCP/UDP (default: 9999/9998)
 - `-b DIR` - Backing directory for persistent storage (required)
 - `-c DIR` - Cache directory for hot objects (optional)
 - `-l SIZE` - Cache size limit in bytes (default: 1GB)
-- `-s PATH` - Unix socket path (default: /tmp/objmapper.sock)
 - `-m NUM` - Max concurrent connections (default: 10)
 
 ### Using the Test Client
 
+#### FD Passing Mode (Unix sockets only)
 ```bash
-# Request object via FD passing (zero-copy)
-./build/objmapper-test-client -m 1 myobject.dat -o output.dat
-
-# Request via traditional copy
-./build/objmapper-test-client -m 2 myobject.dat -o output.dat
-
-# Request via splice
-./build/objmapper-test-client -m 3 myobject.dat -o output.dat
+./build/objmapper-test-client -t unix -m 1 /path/to/object -o output.dat
 ```
+
+#### Copy Mode (all transports)
+```bash
+# Unix socket
+./build/objmapper-test-client -t unix -m 2 /path/to/object -o output.dat
+
+# TCP
+./build/objmapper-test-client -t tcp -H localhost -p 9999 -m 2 /path/to/object
+
+# UDP
+./build/objmapper-test-client -t udp -H localhost -p 9998 -m 2 /path/to/object
+```
+
+#### Splice Mode (stream transports only)
+```bash
+./build/objmapper-test-client -t unix -m 3 /path/to/object -o output.dat
+./build/objmapper-test-client -t tcp -H localhost -p 9999 -m 3 /path/to/object
+```
+
+Client Options:
+- `-t TYPE` - Transport type: unix (default), tcp, udp
+- `-s PATH` - Unix socket path (default: /tmp/objmapper.sock)
+- `-H HOST` - Host for TCP/UDP (default: localhost)
+- `-p PORT` - Port for TCP/UDP (default: 9999/9998)
+- `-m MODE` - Operation mode: 1=fdpass, 2=copy, 3=splice (default: 1)
+- `-o FILE` - Output file (default: stdout)
 
 ### Client API
 
 ```c
 #include "objmapper.h"
 
-// Connect to server
+// Unix socket with FD passing
 client_config_t config = {
+    .transport = OBJMAPPER_TRANSPORT_UNIX,
+    .socket_path = "/tmp/objmapper.sock",
+    .operation_mode = OP_FDPASS
+};
+
+// Or TCP with copy mode
+client_config_t config = {
+    .transport = OBJMAPPER_TRANSPORT_TCP,
+    .net = { .host = "localhost", .port = 9999 },
+    .operation_mode = OP_COPY
+};
+
+// Connect to server
     .socket_path = "/tmp/objmapper.sock",
     .operation_mode = OP_FDPASS  // or OP_COPY, OP_SPLICE
 };
