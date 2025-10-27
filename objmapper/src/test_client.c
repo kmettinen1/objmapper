@@ -15,26 +15,56 @@ static void print_usage(const char *prog)
 {
     printf("Usage: %s [OPTIONS] URI\n", prog);
     printf("\nOptions:\n");
-    printf("  -s PATH    Socket path (default: %s)\n", OBJMAPPER_SOCK_PATH);
+    printf("  -t TYPE    Transport type: unix, tcp, udp (default: unix)\n");
+    printf("  -s PATH    Socket path for Unix transport (default: %s)\n", OBJMAPPER_SOCK_PATH);
+    printf("  -H HOST    Host for TCP/UDP transport (default: localhost)\n");
+    printf("  -p PORT    Port for TCP/UDP transport (default: %d/%d)\n",
+           OBJMAPPER_TCP_PORT, OBJMAPPER_UDP_PORT);
     printf("  -m MODE    Operation mode: 1=fdpass, 2=copy, 3=splice (default: 1)\n");
     printf("  -o FILE    Output file (default: stdout)\n");
     printf("  -h         Show this help\n");
+    printf("\nTransport Types:\n");
+    printf("  unix       Unix domain socket (supports FD passing)\n");
+    printf("  tcp        TCP socket (copy mode only)\n");
+    printf("  udp        UDP socket (copy mode only)\n");
+    printf("\nNote: FD passing (mode 1) only works with Unix sockets.\n");
 }
 
 int main(int argc, char *argv[])
 {
     client_config_t config = {
+        .transport = OBJMAPPER_TRANSPORT_UNIX,
         .socket_path = OBJMAPPER_SOCK_PATH,
         .operation_mode = OP_FDPASS
     };
     
+    const char *host = "localhost";
+    uint16_t port = 0;
     const char *output_file = NULL;
     int opt;
     
-    while ((opt = getopt(argc, argv, "s:m:o:h")) != -1) {
+    while ((opt = getopt(argc, argv, "t:s:H:p:m:o:h")) != -1) {
         switch (opt) {
+            case 't':
+                if (strcmp(optarg, "unix") == 0) {
+                    config.transport = OBJMAPPER_TRANSPORT_UNIX;
+                } else if (strcmp(optarg, "tcp") == 0) {
+                    config.transport = OBJMAPPER_TRANSPORT_TCP;
+                } else if (strcmp(optarg, "udp") == 0) {
+                    config.transport = OBJMAPPER_TRANSPORT_UDP;
+                } else {
+                    fprintf(stderr, "Invalid transport type: %s\n", optarg);
+                    return 1;
+                }
+                break;
             case 's':
                 config.socket_path = optarg;
+                break;
+            case 'H':
+                host = optarg;
+                break;
+            case 'p':
+                port = atoi(optarg);
                 break;
             case 'm':
                 config.operation_mode = optarg[0];
@@ -58,6 +88,18 @@ int main(int argc, char *argv[])
     }
     
     const char *uri = argv[optind];
+    
+    /* Set network config if TCP/UDP */
+    if (config.transport != OBJMAPPER_TRANSPORT_UNIX) {
+        config.net.host = host;
+        config.net.port = port;
+        
+        /* Force copy mode for non-Unix transports */
+        if (config.operation_mode == OP_FDPASS) {
+            fprintf(stderr, "Warning: FD passing not supported on TCP/UDP, using copy mode\n");
+            config.operation_mode = OP_COPY;
+        }
+    }
     
     /* Connect to server */
     int sock = objmapper_client_connect(&config);
@@ -97,7 +139,18 @@ int main(int argc, char *argv[])
     ssize_t n;
     
     while ((n = read(fd, buffer, sizeof(buffer))) > 0) {
-        write(out_fd, buffer, n);
+        ssize_t written = 0;
+        while (written < n) {
+            ssize_t w = write(out_fd, buffer + written, n - written);
+            if (w <= 0) {
+                perror("write output");
+                if (output_file) close(out_fd);
+                close(fd);
+                objmapper_client_close(sock);
+                return 1;
+            }
+            written += w;
+        }
         total += n;
     }
     

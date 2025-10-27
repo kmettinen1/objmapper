@@ -7,23 +7,47 @@
 #define OBJMAPPER_H
 
 #include <sys/types.h>
+#include <stdint.h>
 
 #define OBJMAPPER_SOCK_PATH "/tmp/objmapper.sock"
+#define OBJMAPPER_TCP_PORT 9999
+#define OBJMAPPER_UDP_PORT 9998
+
+/* Transport types */
+typedef enum {
+    OBJMAPPER_TRANSPORT_UNIX = 0,  /* Unix socket (primary, supports FD passing) */
+    OBJMAPPER_TRANSPORT_TCP = 1,   /* TCP socket */
+    OBJMAPPER_TRANSPORT_UDP = 2    /* UDP socket */
+} objmapper_transport_t;
 
 /* Operation types */
-#define OP_FDPASS    '1'  /* File descriptor passing */
+#define OP_FDPASS    '1'  /* File descriptor passing (Unix only) */
 #define OP_COPY      '2'  /* Data copy */
-#define OP_SPLICE    '3'  /* Splice transfer */
+#define OP_SPLICE    '3'  /* Splice transfer (Unix/TCP only) */
 
 /* Client configuration */
 typedef struct {
-    const char *socket_path;
-    char operation_mode;      /* OP_FDPASS, OP_COPY, or OP_SPLICE */
+    objmapper_transport_t transport;
+    union {
+        const char *socket_path;    /* For Unix sockets */
+        struct {
+            const char *host;       /* For TCP/UDP */
+            uint16_t port;
+        } net;
+    };
+    char operation_mode;            /* OP_FDPASS, OP_COPY, or OP_SPLICE */
 } client_config_t;
 
 /* Server configuration */
 typedef struct {
-    const char *socket_path;
+    objmapper_transport_t transport;
+    union {
+        const char *socket_path;    /* For Unix sockets */
+        struct {
+            const char *host;       /* For TCP/UDP (NULL or "*" for any) */
+            uint16_t port;
+        } net;
+    };
     const char *backing_dir;
     const char *cache_dir;
     size_t cache_limit;

@@ -9,6 +9,7 @@ LDFLAGS = -pthread
 # Directories
 LIB_FDPASS = lib/fdpass
 LIB_STORAGE = lib/storage
+LIB_TRANSPORT = lib/transport
 OBJMAPPER_SRC = objmapper/src
 OBJMAPPER_INC = objmapper/include
 BUILD_DIR = build
@@ -16,6 +17,7 @@ BUILD_DIR = build
 # Source files
 FDPASS_SRC = $(LIB_FDPASS)/fdpass.c
 STORAGE_SRC = $(LIB_STORAGE)/storage.c
+TRANSPORT_SRC = $(LIB_TRANSPORT)/transport.c
 SERVER_SRC = $(OBJMAPPER_SRC)/server.c
 CLIENT_SRC = $(OBJMAPPER_SRC)/client.c
 MAIN_SRC = $(OBJMAPPER_SRC)/main.c
@@ -24,6 +26,7 @@ TEST_CLIENT_SRC = $(OBJMAPPER_SRC)/test_client.c
 # Object files
 FDPASS_OBJ = $(BUILD_DIR)/fdpass.o
 STORAGE_OBJ = $(BUILD_DIR)/storage.o
+TRANSPORT_OBJ = $(BUILD_DIR)/transport.o
 SERVER_OBJ = $(BUILD_DIR)/server.o
 CLIENT_OBJ = $(BUILD_DIR)/client.o
 MAIN_OBJ = $(BUILD_DIR)/main.o
@@ -53,8 +56,11 @@ $(FDPASS_OBJ): $(FDPASS_SRC) $(LIB_FDPASS)/fdpass.h
 $(STORAGE_OBJ): $(STORAGE_SRC) $(LIB_STORAGE)/storage.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
+$(TRANSPORT_OBJ): $(TRANSPORT_SRC) $(LIB_TRANSPORT)/transport.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
 # Static library
-$(LIB_OBJMAPPER): $(FDPASS_OBJ) $(STORAGE_OBJ)
+$(LIB_OBJMAPPER): $(FDPASS_OBJ) $(STORAGE_OBJ) $(TRANSPORT_OBJ)
 	ar rcs $@ $^
 
 # Server components
@@ -101,4 +107,5 @@ help:
 	@echo "Components:"
 	@echo "  lib/fdpass          File descriptor passing library"
 	@echo "  lib/storage         Object storage with URI dictionary"
+	@echo "  lib/transport       Multi-transport abstraction (Unix/TCP/UDP)"
 	@echo "  objmapper/src       Server and client implementations"
