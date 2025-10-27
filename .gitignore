@@ -4,11 +4,14 @@
 *.a
 *.out
 *.exe
+build/
 
 # Executables
 server
 client
 bridge
+objmapper-server
+objmapper-test-client
 
 # Debug files
 *.dSYM/
@@ -29,6 +32,13 @@ flamegraph*.svg
 # Results directories
 results*/
 *results*/
+
+# Test data files
+datapass/csrc/back/
+datapass/csrc/w-*/
+datapass/csrc/nc-*/
+datapass/csrc/cache
+datapass/csrc/cached/
 
 # Editor files
 .vscode/
