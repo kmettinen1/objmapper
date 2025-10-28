@@ -190,8 +190,12 @@ struct backend_manager {
     size_t num_backends;
     size_t backends_capacity;
     
-    /* Object metadata index (hash table: URI -> metadata) */
-    void *object_index;  /* Hash table */
+    /* Global index (from INDEX_ARCHITECTURE.md) */
+    global_index_t *global_index;  /* URI -> FD with RCU */
+    
+    /* Per-backend indexes */
+    backend_index_t **backend_indexes;  /* Indexed by backend_id */
+    size_t backend_indexes_capacity;
     
     /* Migration queue */
     void *migration_queue;  /* Priority queue */
@@ -418,25 +422,60 @@ uint32_t select_backend_for_object(backend_manager_t *mgr, uint32_t flags) {
 
 ```c
 int backend_get_object(backend_manager_t *mgr, const char *uri, uint32_t *backend_id) {
-    /* Check metadata index first */
-    object_metadata_t *meta = hash_table_get(mgr->object_index, uri);
-    
-    if (meta) {
-        /* Found in index - go directly to backend */
-        backend_info_t *backend = get_backend(mgr, meta->backend_id);
-        char path[PATH_MAX];
-        snprintf(path, sizeof(path), "%s/%s", backend->mount_path, uri);
+    /* Fast path: Check global index first (lock-free RCU lookup) */
+    fd_ref_t fd_ref;
+    if (global_index_lookup(mgr->global_index, uri, &fd_ref) == 0) {
+        /* Found in index - acquire FD reference */
+        int fd = fd_ref_acquire(&fd_ref);
         
-        int fd = open(path, O_RDONLY);
         if (fd >= 0) {
-            /* Update access tracking */
-            backend_record_access(mgr, uri);
-            if (backend_id) *backend_id = meta->backend_id;
-            return fd;
+            /* Success! FD is cached and ready */
+            if (backend_id) *backend_id = fd_ref.entry->backend_id;
+            
+            /* Duplicate FD for caller (caller owns it) */
+            int dup_fd = dup(fd);
+            
+            /* Release our reference */
+            fd_ref_release(&fd_ref);
+            
+            return dup_fd;
+        }
+        
+        /* FD acquisition failed (maybe evicted), fall through */
+        fd_ref_release(&fd_ref);
+    }
+    
+    /* Slow path: Not in index, search backends */
+    /* First check backend-specific indexes (still faster than filesystem) */
+    for (size_t i = 0; i < mgr->num_backends; i++) {
+        backend_info_t *backend = mgr->backends[i];
+        backend_index_t *bidx = mgr->backend_indexes[backend->backend_id];
+        
+        if (!bidx) continue;
+        
+        /* Lookup in backend index */
+        index_entry_t *entry = backend_index_lookup(bidx, uri);
+        if (entry) {
+            /* Found in backend index - try to open */
+            int fd = open(entry->backend_path, O_RDONLY);
+            if (fd >= 0) {
+                /* Success - add to global index */
+                index_entry_t *new_entry = index_entry_create(
+                    uri, backend->backend_id, entry->backend_path
+                );
+                global_index_insert(mgr->global_index, new_entry);
+                
+                if (backend_id) *backend_id = backend->backend_id;
+                return fd;
+            }
+            
+            /* Stale entry - remove from backend index */
+            backend_index_remove(bidx, uri);
+            atomic_store(&bidx->dirty, 1);
         }
     }
     
-    /* Not in index or open failed - search all backends */
+    /* Last resort: Filesystem scan */
     for (size_t i = 0; i < mgr->num_backends; i++) {
         backend_info_t *backend = mgr->backends[i];
         
@@ -445,9 +484,15 @@ int backend_get_object(backend_manager_t *mgr, const char *uri, uint32_t *backen
         
         int fd = open(path, O_RDONLY);
         if (fd >= 0) {
-            /* Found! Update index */
-            update_or_create_metadata(mgr, uri, backend->backend_id);
-            backend_record_access(mgr, uri);
+            /* Found! Add to both indexes */
+            index_entry_t *entry = index_entry_create(uri, backend->backend_id, path);
+            global_index_insert(mgr->global_index, entry);
+            
+            if (mgr->backend_indexes[backend->backend_id]) {
+                backend_index_insert(mgr->backend_indexes[backend->backend_id], entry);
+                atomic_store(&mgr->backend_indexes[backend->backend_id]->dirty, 1);
+            }
+            
             if (backend_id) *backend_id = backend->backend_id;
             return fd;
         }
@@ -739,7 +784,46 @@ The backend manager integrates seamlessly with the protocol library:
 int handle_request(objm_connection_t *conn, objm_request_t *req) {
     backend_manager_t *mgr = get_backend_manager();
     
-    /* Get object from appropriate backend */
+    /* Fast path: Lookup in global index with FD caching */
+    fd_ref_t fd_ref;
+    if (global_index_lookup(mgr->global_index, req->uri, &fd_ref) == 0) {
+        /* Found in index - acquire FD */
+        int fd = fd_ref_acquire(&fd_ref);
+        
+        if (fd >= 0) {
+            /* Got cached FD! Build response */
+            struct stat st;
+            fstat(fd, &st);
+            
+            uint8_t *metadata = objm_metadata_create(100);
+            size_t meta_len = 0;
+            
+            meta_len = objm_metadata_add_size(metadata, meta_len, st.st_size);
+            meta_len = objm_metadata_add_backend(metadata, meta_len, 
+                                                 fd_ref.entry->backend_id);
+            
+            /* Send response with FD pass */
+            objm_response_t resp = {
+                .request_id = req->id,
+                .status = OBJM_STATUS_OK,
+                .fd = dup(fd),  /* Dup FD for protocol library */
+                .metadata = metadata,
+                .metadata_len = meta_len
+            };
+            
+            objm_server_send_response(conn, &resp);
+            
+            free(metadata);
+            fd_ref_release(&fd_ref);
+            
+            return 0;
+        }
+        
+        /* FD acquisition failed, fall through */
+        fd_ref_release(&fd_ref);
+    }
+    
+    /* Slow path: Get object from backend (searches all backends/indexes) */
     uint32_t backend_id;
     int fd = backend_get_object(mgr, req->uri, &backend_id);
     
@@ -770,11 +854,36 @@ int handle_request(objm_connection_t *conn, objm_request_t *req) {
     objm_server_send_response(conn, &resp);
     
     free(metadata);
-    close(fd);
+    /* Note: fd closed by protocol library after sending */
     
     return 0;
 }
 ```
+
+### Performance With Index Integration
+
+**Cached FD Path (Index Hit):**
+- Global index lookup: ~100ns (lock-free RCU)
+- FD acquisition: ~10ns (atomic refcount)
+- **Total: ~110ns** ⚡
+
+**Backend Index Path (Index Hit, FD Evicted):**
+- Backend index lookup: ~100ns
+- open() syscall: ~1-5μs
+- Add to global index: ~1μs
+- **Total: ~2-7μs**
+
+**Filesystem Scan Path (Index Miss):**
+- Multi-backend search: ~8μs per backend
+- open() syscall: ~1-5μs
+- Add to both indexes: ~2μs
+- **Total: ~10-50μs** (depending on number of backends)
+
+**Speedup vs Original (8μs per request):**
+- Cached FD: **~80× faster** 🚀
+- Backend index: **~1-4× faster**
+- Filesystem scan: ~1-6× slower (but only happens once, then cached)
+
 
 ## Security Considerations
 
@@ -834,6 +943,246 @@ int validate_migration(object_metadata_t *obj, backend_info_t *dst) {
 7. **Snapshots**: Point-in-time snapshots per backend
 8. **Quotas**: Per-user or per-namespace quotas
 
+## Startup and Index Initialization
+
+### Startup Sequence
+
+```c
+int main(int argc, char **argv) {
+    /* 1. Create backend manager */
+    backend_manager_t *mgr = backend_manager_create();
+    
+    /* 2. Create global index */
+    global_index_t *global_idx = global_index_create(
+        1024 * 1024,  /* 1M buckets for ~10M objects */
+        10000         /* Cache up to 10K open FDs */
+    );
+    mgr->global_index = global_idx;
+    
+    /* 3. Register backends in performance order (fastest first) */
+    
+    /* Memory backend (tmpfs) - ephemeral, no persistent index */
+    backend_info_t mem_backend = {
+        .type = BACKEND_TYPE_MEMORY,
+        .flags = BACKEND_FLAG_EPHEMERAL | BACKEND_FLAG_READABLE | 
+                 BACKEND_FLAG_WRITABLE | BACKEND_FLAG_MIGRATION_SRC,
+        .perf_factor = 1.0,
+        .capacity_bytes = 16ULL * 1024 * 1024 * 1024,  /* 16 GB */
+        .mount_path = "/mnt/objmapper/memory",
+        .name = "Memory Cache"
+    };
+    uint32_t mem_id = backend_register(mgr, &mem_backend);
+    
+    /* Memory backend doesn't use persistent index */
+    backend_index_t *mem_idx = backend_index_create(mem_id, NULL, 256 * 1024);
+    mgr->backend_indexes[mem_id] = mem_idx;
+    
+    /* NVMe backend - persistent with index */
+    backend_info_t nvme_backend = {
+        .type = BACKEND_TYPE_NVME,
+        .flags = BACKEND_FLAG_PERSISTENT | BACKEND_FLAG_READABLE | 
+                 BACKEND_FLAG_WRITABLE | BACKEND_FLAG_MIGRATION_SRC | 
+                 BACKEND_FLAG_MIGRATION_DST,
+        .perf_factor = 3.0,
+        .capacity_bytes = 1ULL * 1024 * 1024 * 1024 * 1024,  /* 1 TB */
+        .mount_path = "/mnt/objmapper/nvme",
+        .name = "NVMe Hot Tier"
+    };
+    uint32_t nvme_id = backend_register(mgr, &nvme_backend);
+    
+    /* Create backend index with persistence */
+    backend_index_t *nvme_idx = backend_index_create(
+        nvme_id,
+        "/mnt/objmapper/nvme/.objmapper_index",  /* Persistent index file */
+        256 * 1024  /* 256K buckets */
+    );
+    
+    /* Try to load persistent index */
+    printf("Loading NVMe index...\n");
+    int loaded = backend_index_load(nvme_idx);
+    
+    if (loaded < 0) {
+        /* No index or corrupted - scan filesystem */
+        printf("Index not found, scanning NVMe filesystem...\n");
+        
+        struct scan_progress {
+            size_t count;
+            time_t start;
+        } progress = {0, time(NULL)};
+        
+        auto progress_callback = [](size_t count, void *data) {
+            struct scan_progress *p = data;
+            p->count = count;
+            if (count % 10000 == 0) {
+                time_t elapsed = time(NULL) - p->start;
+                printf("  Scanned %zu objects in %ld seconds...\n", count, elapsed);
+            }
+        };
+        
+        int scanned = backend_index_scan(nvme_idx, &nvme_backend, 
+                                         progress_callback, &progress);
+        printf("Scanned %d objects\n", scanned);
+        
+        /* Save index for next startup */
+        printf("Saving index...\n");
+        backend_index_save(nvme_idx);
+    } else {
+        printf("Loaded %d objects from index\n", loaded);
+    }
+    
+    mgr->backend_indexes[nvme_id] = nvme_idx;
+    
+    /* Populate global index from backend index */
+    printf("Populating global index from NVMe...\n");
+    size_t populated = populate_global_from_backend(global_idx, nvme_idx);
+    printf("Added %zu entries to global index\n", populated);
+    
+    /* HDD backend - persistent with index */
+    backend_info_t hdd_backend = {
+        .type = BACKEND_TYPE_HDD,
+        .flags = BACKEND_FLAG_PERSISTENT | BACKEND_FLAG_READABLE | 
+                 BACKEND_FLAG_WRITABLE | BACKEND_FLAG_MIGRATION_DST,
+        .perf_factor = 80.0,
+        .capacity_bytes = 10ULL * 1024 * 1024 * 1024 * 1024,  /* 10 TB */
+        .mount_path = "/mnt/objmapper/hdd",
+        .name = "HDD Cold Tier"
+    };
+    uint32_t hdd_id = backend_register(mgr, &hdd_backend);
+    
+    backend_index_t *hdd_idx = backend_index_create(
+        hdd_id,
+        "/mnt/objmapper/hdd/.objmapper_index",
+        1024 * 1024  /* 1M buckets for large cold storage */
+    );
+    
+    /* Load or scan HDD index */
+    if (backend_index_load(hdd_idx) < 0) {
+        printf("Scanning HDD filesystem (this may take a while)...\n");
+        backend_index_scan(hdd_idx, &hdd_backend, progress_callback, &progress);
+        backend_index_save(hdd_idx);
+    }
+    
+    mgr->backend_indexes[hdd_id] = hdd_idx;
+    populate_global_from_backend(global_idx, hdd_idx);
+    
+    /* 4. Start background threads */
+    
+    /* Lifecycle management thread */
+    pthread_t lifecycle_tid;
+    pthread_create(&lifecycle_tid, NULL, lifecycle_thread, mgr);
+    
+    /* Index sync thread (saves dirty indexes periodically) */
+    pthread_t index_sync_tid;
+    pthread_create(&index_sync_tid, NULL, index_sync_thread, mgr);
+    
+    /* 5. Start server */
+    printf("Server ready with %zu indexed objects\n", 
+           atomic_load(&global_idx->num_entries));
+    
+    run_server(mgr);
+    
+    return 0;
+}
+```
+
+### Helper: Populate Global from Backend
+
+```c
+size_t populate_global_from_backend(global_index_t *global_idx, 
+                                     backend_index_t *backend_idx) {
+    size_t count = 0;
+    
+    for (size_t i = 0; i < backend_idx->num_buckets; i++) {
+        index_entry_t *entry = backend_idx->buckets[i];
+        
+        while (entry) {
+            /* Create new entry for global index (don't share entries) */
+            index_entry_t *global_entry = index_entry_create(
+                entry->uri,
+                entry->backend_id,
+                entry->backend_path
+            );
+            
+            /* Copy metadata */
+            global_entry->size_bytes = entry->size_bytes;
+            global_entry->mtime = entry->mtime;
+            global_entry->flags = entry->flags;
+            
+            /* Insert into global index */
+            if (global_index_insert(global_idx, global_entry) == 0) {
+                count++;
+            }
+            
+            entry = entry->next;
+        }
+    }
+    
+    return count;
+}
+```
+
+### Index Sync Thread
+
+```c
+void *index_sync_thread(void *arg) {
+    backend_manager_t *mgr = arg;
+    
+    while (1) {
+        sleep(60);  /* Sync every 60 seconds */
+        
+        for (size_t i = 0; i < mgr->num_backends; i++) {
+            backend_info_t *backend = mgr->backends[i];
+            backend_index_t *idx = mgr->backend_indexes[backend->backend_id];
+            
+            if (!idx || !idx->persist_enabled) continue;
+            
+            /* Check if dirty */
+            if (atomic_load(&idx->dirty)) {
+                printf("Syncing %s index...\n", backend->name);
+                if (backend_index_save(idx) == 0) {
+                    printf("  Saved %zu entries\n", 
+                           atomic_load(&idx->num_entries));
+                } else {
+                    fprintf(stderr, "  Failed to save index\n");
+                }
+            }
+        }
+    }
+    
+    return NULL;
+}
+```
+
+### Startup Time Comparison
+
+**Without Persistent Index:**
+- Scan 1M objects on NVMe: ~10-30 seconds
+- Scan 10M objects on HDD: ~5-15 minutes
+- Total: **5-15 minutes** 😱
+
+**With Persistent Index:**
+- Load 1M entries from index: ~100-500ms
+- Load 10M entries from index: ~1-5 seconds
+- Total: **~1-5 seconds** ⚡
+
+**Speedup: ~100-1000×** faster startup!
+
+### Index Storage Size
+
+Per entry in persistent index:
+- Header: ~30 bytes
+- URI (avg 50 chars): ~50 bytes
+- Path (avg 100 chars): ~100 bytes
+- Metadata: ~50 bytes
+- **Total: ~230 bytes/entry**
+
+Storage requirements:
+- 1M objects: ~230 MB
+- 10M objects: ~2.3 GB
+- 100M objects: ~23 GB
+
+Easily fits on modern storage systems.
+
 ## Summary
 
 This backend architecture provides:
@@ -846,5 +1195,7 @@ This backend architecture provides:
 ✅ **Migration support** - Manual or automatic object movement  
 ✅ **Scalability** - Efficient multi-backend lookups  
 ✅ **Integration ready** - Works with protocol library  
+✅ **Index integration** - Lock-free RCU index with FD caching (80× speedup)  
+✅ **Persistent indexes** - Fast startup without filesystem scan  
 
 Next steps: Implement backend manager and integrate with thread pool + protocol library.
