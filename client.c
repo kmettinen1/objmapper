@@ -218,42 +218,11 @@ static int cmd_delete(objm_connection_t *conn, const char *uri) {
     return 0;
 }
 
+/* LIST command removed - should be management API
 static int cmd_list(objm_connection_t *conn) {
-    /* Send LIST request */
-    objm_request_t req = {
-        .id = 0,
-        .flags = 0,
-        .mode = OBJM_MODE_FDPASS,
-        .uri = "/list",
-        .uri_len = 5
-    };
-    
-    printf("LIST\n");
-    
-    if (objm_client_send_request(conn, &req) < 0) {
-        fprintf(stderr, "Failed to send LIST request\n");
-        return -1;
-    }
-    
-    /* Receive response */
-    objm_response_t *resp = NULL;
-    if (objm_client_recv_response(conn, &resp) < 0) {
-        fprintf(stderr, "Failed to receive response\n");
-        return -1;
-    }
-    
-    if (resp->status != OBJM_STATUS_OK) {
-        fprintf(stderr, "LIST failed: %s\n",
-                resp->error_msg ? resp->error_msg : "Unknown error");
-        objm_response_free(resp);
-        return -1;
-    }
-    
-    printf("Object count: %zu\n", resp->content_len);
-    
-    objm_response_free(resp);
-    return 0;
+    ... implementation removed ...
 }
+*/
 
 /* ============================================================================
  * Main
@@ -265,12 +234,12 @@ static void print_usage(const char *prog) {
     printf("  put <uri> <file>     Upload file to URI\n");
     printf("  get <uri> <file>     Download URI to file\n");
     printf("  delete <uri>         Delete object at URI\n");
-    printf("  list                 List all objects\n");
     printf("\nExamples:\n");
     printf("  %s put /data/test.txt myfile.txt\n", prog);
     printf("  %s get /data/test.txt output.txt\n", prog);
     printf("  %s delete /data/test.txt\n", prog);
-    printf("  %s list\n", prog);
+    printf("\nNote: Object listing is not supported in the main protocol.\n");
+    printf("      Use a separate management API for administrative tasks.\n");
 }
 
 int main(int argc, char **argv) {
@@ -344,7 +313,10 @@ int main(int argc, char **argv) {
             ret = cmd_delete(conn, argv[arg_offset + 1]);
         }
     } else if (strcmp(command, "list") == 0) {
-        ret = cmd_list(conn);
+        fprintf(stderr, "LIST command disabled - use management API instead\n");
+        fprintf(stderr, "Note: Object listing should be implemented via a separate\n");
+        fprintf(stderr, "      management interface, not the main storage protocol.\n");
+        ret = 1;
     } else {
         fprintf(stderr, "Unknown command: %s\n", command);
         print_usage(argv[0]);

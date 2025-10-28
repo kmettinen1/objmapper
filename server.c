@@ -211,14 +211,22 @@ static int handle_delete(objm_connection_t *conn, const objm_request_t *req) {
 }
 
 /**
- * Handle LIST request (custom extension)
+ * Handle LIST request (disabled - should be management API)
  * 
- * Returns list of all objects in backend
+ * Note: LIST functionality should be implemented as a separate
+ * management/admin interface, not as part of the main object
+ * storage protocol. Use a dedicated management socket or REST API.
  */
 static int handle_list(objm_connection_t *conn, const objm_request_t *req) {
+    (void)req;  /* Unused */
+    
+    objm_server_send_error(conn, req->id, OBJM_STATUS_UNSUPPORTED_OP,
+                          "LIST is disabled - use management API");
+    return -1;
+    
+    /* Original implementation disabled:
     int backend_id = g_persistent_backend_id;
     
-    /* Parse backend ID from URI if specified */
     if (req->uri && strncmp(req->uri, "/backend/", 9) == 0) {
         backend_id = atoi(req->uri + 9);
     }
@@ -232,8 +240,6 @@ static int handle_list(objm_connection_t *conn, const objm_request_t *req) {
         return -1;
     }
     
-    /* Build response with URI list in metadata */
-    /* For now, just return count */
     objm_response_t resp = {
         .request_id = req->id,
         .status = OBJM_STATUS_OK,
@@ -246,13 +252,13 @@ static int handle_list(objm_connection_t *conn, const objm_request_t *req) {
     
     int ret = objm_server_send_response(conn, &resp);
     
-    /* Free URI list */
     for (size_t i = 0; i < count; i++) {
         free(uris[i]);
     }
     free(uris);
     
     return ret;
+    */
 }
 
 /* ============================================================================
