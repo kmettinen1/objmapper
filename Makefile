@@ -12,8 +12,10 @@ BACKEND_LIB = lib/backend/libobjbackend.a
 
 ALL_LIBS = $(BACKEND_LIB) $(INDEX_LIB) $(PROTOCOL_LIB)
 
-# New executables
+# Executables
 DEMO = demo_integration
+SERVER = server
+CLIENT = client
 
 .PHONY: all clean libs test new old
 
@@ -21,7 +23,7 @@ DEMO = demo_integration
 all: new
 
 # New architecture
-new: libs $(DEMO)
+new: libs $(SERVER) $(CLIENT) $(DEMO)
 
 # Old architecture (legacy)
 old:
@@ -38,6 +40,14 @@ libs:
 $(DEMO): demo_integration.c $(ALL_LIBS)
 	$(CC) $(CFLAGS) $< $(BACKEND_LIB) $(INDEX_LIB) $(PROTOCOL_LIB) $(LDFLAGS) -o $@
 
+# Server
+$(SERVER): server.c $(ALL_LIBS)
+	$(CC) $(CFLAGS) $< $(BACKEND_LIB) $(INDEX_LIB) $(PROTOCOL_LIB) $(LDFLAGS) -o $@
+
+# Client
+$(CLIENT): client.c $(PROTOCOL_LIB)
+	$(CC) $(CFLAGS) $< $(PROTOCOL_LIB) $(LDFLAGS) -o $@
+
 # Test
 test: all
 	@echo "Running component tests..."
@@ -48,7 +58,7 @@ test: all
 
 # Clean
 clean:
-	rm -f $(DEMO)
+	rm -f $(DEMO) $(SERVER) $(CLIENT)
 	$(MAKE) -C lib/protocol clean
 	$(MAKE) -C lib/index clean
 	$(MAKE) -C lib/backend clean
