@@ -451,6 +451,17 @@ static int init_backends(const char *memory_path, const char *persistent_path) {
     printf("Backend roles: default=%d, ephemeral=%d, cache=%d\n",
            g_persistent_backend_id, g_memory_backend_id, g_memory_backend_id);
     
+    /* Scan backends to rebuild index from existing files */
+    int memory_count = backend_manager_scan(g_backend_mgr, g_memory_backend_id);
+    if (memory_count >= 0) {
+        printf("Scanned memory backend: %d objects found\n", memory_count);
+    }
+    
+    int persistent_count = backend_manager_scan(g_backend_mgr, g_persistent_backend_id);
+    if (persistent_count >= 0) {
+        printf("Scanned persistent backend: %d objects found\n", persistent_count);
+    }
+    
     /* Start automatic caching */
     if (backend_start_caching(g_backend_mgr, CACHE_CHECK_INTERVAL_US,
                              CACHE_HOTNESS_THRESHOLD) == 0) {

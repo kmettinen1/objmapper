@@ -14,6 +14,7 @@
 #include <errno.h>
 #include <time.h>
 #include <math.h>
+#include <dirent.h>
 
 /* Helper to get monotonic time in microseconds */
 static uint64_t get_monotonic_us(void) {
@@ -458,6 +459,82 @@ int backend_delete_object(backend_manager_t *mgr, const char *uri) {
     fd_ref_release(&ref);
     
     return 0;
+}
+
+int backend_manager_scan(backend_manager_t *mgr, int backend_id) {
+    if (!mgr) return -1;
+    
+    backend_info_t *backend = backend_manager_get_backend(mgr, backend_id);
+    if (!backend || !(backend->flags & BACKEND_FLAG_ENABLED)) {
+        return -1;
+    }
+    
+    /* Helper function to recursively scan directory */
+    int count = 0;
+    size_t mount_path_len = strlen(backend->mount_path);
+    
+    int scan_dir_recursive(const char *dir_path) {
+        DIR *dir = opendir(dir_path);
+        if (!dir) return 0;
+        
+        struct dirent *entry;
+        while ((entry = readdir(dir)) != NULL) {
+            /* Skip . and .. */
+            if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+                continue;
+            }
+            
+            /* Build full path */
+            char full_path[2048];
+            snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, entry->d_name);
+            
+            struct stat st;
+            if (stat(full_path, &st) < 0) {
+                continue;
+            }
+            
+            if (S_ISDIR(st.st_mode)) {
+                /* Recursively scan subdirectory */
+                scan_dir_recursive(full_path);
+            } else if (S_ISREG(st.st_mode)) {
+                /* Regular file - create index entry */
+                /* URI is the path relative to mount point */
+                const char *uri = full_path + mount_path_len;
+                
+                /* Create index entry */
+                index_entry_t *idx_entry = index_entry_create(uri, backend_id, full_path);
+                if (idx_entry) {
+                    idx_entry->size_bytes = st.st_size;
+                    idx_entry->flags = (backend->flags & BACKEND_FLAG_EPHEMERAL_ONLY) ? 
+                                       INDEX_FLAG_EPHEMERAL : INDEX_FLAG_PERSISTENT;
+                    
+                    /* Insert into global index */
+                    if (global_index_insert(mgr->global_index, idx_entry) >= 0) {
+                        /* Also insert into backend index */
+                        backend_index_insert(backend->index, idx_entry);
+                        count++;
+                        
+                        /* Update statistics */
+                        atomic_fetch_add(&backend->object_count, 1);
+                        atomic_fetch_add(&backend->used_bytes, st.st_size);
+                        atomic_fetch_add(&mgr->total_objects, 1);
+                        atomic_fetch_add(&mgr->total_bytes, st.st_size);
+                    }
+                    
+                    index_entry_put(idx_entry);  /* Release our reference */
+                }
+            }
+        }
+        
+        closedir(dir);
+        return 0;
+    }
+    
+    pthread_rwlock_wrlock(&backend->rwlock);
+    scan_dir_recursive(backend->mount_path);
+    pthread_rwlock_unlock(&backend->rwlock);
+    
+    return count;
 }
 
 int backend_get_metadata(backend_manager_t *mgr,

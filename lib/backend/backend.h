@@ -252,6 +252,15 @@ int backend_get_object(backend_manager_t *mgr,
 int backend_delete_object(backend_manager_t *mgr, const char *uri);
 
 /**
+ * Scan a backend filesystem and populate indexes
+ *
+ * @param mgr Backend manager
+ * @param backend_id Backend to scan
+ * @return Number of objects indexed, or -1 on error
+ */
+int backend_manager_scan(backend_manager_t *mgr, int backend_id);
+
+/**
  * Get object metadata
  *
  * @param mgr Backend manager

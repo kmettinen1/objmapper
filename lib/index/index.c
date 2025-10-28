@@ -232,8 +232,12 @@ void fd_ref_release(fd_ref_t *fd_ref) {
     
     index_entry_t *entry = fd_ref->entry;
     
-    /* Decrement FD refcount */
-    atomic_fetch_sub(&entry->fd_refcount, 1);
+    /* Close FD if we have one */
+    if (fd_ref->fd >= 0) {
+        close(fd_ref->fd);
+        /* Decrement FD refcount */
+        atomic_fetch_sub(&entry->fd_refcount, 1);
+    }
     
     /* Release entry reference */
     index_entry_put(entry);
@@ -323,13 +327,28 @@ int global_index_lookup(global_index_t *idx, const char *uri, fd_ref_t *fd_ref) 
             /* Found! Acquire entry reference */
             index_entry_get(entry);
             
+            /* Open FD if not already open */
+            int fd = -1;
+            if (entry->backend_path) {
+                fd = open(entry->backend_path, O_RDWR);
+                if (fd < 0) {
+                    /* Try read-only if read-write fails */
+                    fd = open(entry->backend_path, O_RDONLY);
+                }
+            }
+            
             /* Prepare FD reference */
             fd_ref->entry = entry;
-            fd_ref->fd = -1;
+            fd_ref->fd = fd;
             fd_ref->generation = 0;
             
             /* Record access */
             index_entry_record_access(entry);
+            
+            /* Increment FD refcount if we opened it */
+            if (fd >= 0) {
+                atomic_fetch_add(&entry->fd_refcount, 1);
+            }
             
             atomic_fetch_add(&idx->stat_hits, 1);
             return 0;
@@ -818,13 +837,71 @@ int backend_index_load(backend_index_t *idx) {
 int backend_index_scan(backend_index_t *idx, const char *mount_path,
                        void (*progress_cb)(size_t count, void *data),
                        void *user_data) {
-    /* Filesystem scan implementation - recursive directory walk */
-    /* For brevity, this is simplified. Production would use nftw() or similar */
-    
     if (!idx || !mount_path) return -1;
     
-    /* TODO: Implement recursive directory scanning */
-    /* This would walk the filesystem tree and create index entries */
+    /* For this implementation, we'll do a simple recursive scan
+     * In production, this would use nftw() or similar for efficiency */
     
-    return 0;  /* Placeholder */
+    size_t count = 0;
+    size_t mount_path_len = strlen(mount_path);
+    
+    /* Helper function to recursively scan directory */
+    int scan_dir_recursive(const char *dir_path, size_t base_len) {
+        DIR *dir = opendir(dir_path);
+        if (!dir) return 0;
+        
+        struct dirent *entry;
+        while ((entry = readdir(dir)) != NULL) {
+            /* Skip . and .. */
+            if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+                continue;
+            }
+            
+            /* Build full path */
+            char full_path[2048];
+            snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, entry->d_name);
+            
+            struct stat st;
+            if (stat(full_path, &st) < 0) {
+                continue;
+            }
+            
+            if (S_ISDIR(st.st_mode)) {
+                /* Recursively scan subdirectory */
+                scan_dir_recursive(full_path, base_len);
+            } else if (S_ISREG(st.st_mode)) {
+                /* Regular file - create index entry */
+                /* URI is the path relative to mount point */
+                const char *uri = full_path + base_len;
+                
+                /* Create index entry */
+                index_entry_t *idx_entry = index_entry_create(uri, idx->backend_id, full_path);
+                if (idx_entry) {
+                    idx_entry->size_bytes = st.st_size;
+                    idx_entry->flags = INDEX_FLAG_PERSISTENT;
+                    
+                    /* Insert into index */
+                    backend_index_insert(idx, idx_entry);
+                    index_entry_put(idx_entry);  /* Release our reference */
+                    
+                    count++;
+                    
+                    if (progress_cb && (count % 100 == 0)) {
+                        progress_cb(count, user_data);
+                    }
+                }
+            }
+        }
+        
+        closedir(dir);
+        return 0;
+    }
+    
+    scan_dir_recursive(mount_path, mount_path_len);
+    
+    if (progress_cb) {
+        progress_cb(count, user_data);
+    }
+    
+    return (int)count;
 }
