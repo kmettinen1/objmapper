@@ -1,111 +1,62 @@
 # Objmapper Makefile
-# Clean, modular build system
+# Integrated build system for new architecture
 
 CC = gcc
-CFLAGS = -Wall -Wextra -O2 -pthread -I./objmapper/include
-DEBUG_FLAGS = -g -DDEBUG
-LDFLAGS = -pthread
-
-# Directories
-LIB_FDPASS = lib/fdpass
-LIB_STORAGE = lib/storage
-LIB_TRANSPORT = lib/transport
-OBJMAPPER_SRC = objmapper/src
-OBJMAPPER_INC = objmapper/include
-BUILD_DIR = build
-
-# Source files
-FDPASS_SRC = $(LIB_FDPASS)/fdpass.c
-STORAGE_SRC = $(LIB_STORAGE)/storage.c
-TRANSPORT_SRC = $(LIB_TRANSPORT)/transport.c
-SERVER_SRC = $(OBJMAPPER_SRC)/server.c
-CLIENT_SRC = $(OBJMAPPER_SRC)/client.c
-MAIN_SRC = $(OBJMAPPER_SRC)/main.c
-TEST_CLIENT_SRC = $(OBJMAPPER_SRC)/test_client.c
-
-# Object files
-FDPASS_OBJ = $(BUILD_DIR)/fdpass.o
-STORAGE_OBJ = $(BUILD_DIR)/storage.o
-TRANSPORT_OBJ = $(BUILD_DIR)/transport.o
-SERVER_OBJ = $(BUILD_DIR)/server.o
-CLIENT_OBJ = $(BUILD_DIR)/client.o
-MAIN_OBJ = $(BUILD_DIR)/main.o
-TEST_CLIENT_OBJ = $(BUILD_DIR)/test_client.o
+CFLAGS = -Wall -Wextra -O2 -I. -Ilib/protocol -Ilib/index -Ilib/backend -pthread -std=gnu11
+LDFLAGS = -pthread -lm
 
 # Libraries
-LIB_OBJMAPPER = $(BUILD_DIR)/libobjmapper.a
+PROTOCOL_LIB = lib/protocol/libobmprotocol.a
+INDEX_LIB = lib/index/libobjindex.a
+BACKEND_LIB = lib/backend/libobjbackend.a
 
-# Executables
-OBJMAPPER_SERVER = $(BUILD_DIR)/objmapper-server
-OBJMAPPER_TEST_CLIENT = $(BUILD_DIR)/objmapper-test-client
+ALL_LIBS = $(BACKEND_LIB) $(INDEX_LIB) $(PROTOCOL_LIB)
 
-.PHONY: all clean debug install libs
+# New executables
+DEMO = demo_integration
 
-all: $(BUILD_DIR) $(OBJMAPPER_SERVER) $(OBJMAPPER_TEST_CLIENT)
+.PHONY: all clean libs test new old
 
-debug: CFLAGS += $(DEBUG_FLAGS)
-debug: all
+# Default target - build new architecture
+all: new
 
-$(BUILD_DIR):
-	mkdir -p $(BUILD_DIR)
+# New architecture
+new: libs $(DEMO)
 
-# Library objects
-$(FDPASS_OBJ): $(FDPASS_SRC) $(LIB_FDPASS)/fdpass.h
-	$(CC) $(CFLAGS) -c $< -o $@
+# Old architecture (legacy)
+old:
+	@echo "Building legacy objmapper..."
+	$(MAKE) -f Makefile.old
 
-$(STORAGE_OBJ): $(STORAGE_SRC) $(LIB_STORAGE)/storage.h
-	$(CC) $(CFLAGS) -c $< -o $@
+# Build all libraries
+libs:
+	$(MAKE) -C lib/protocol
+	$(MAKE) -C lib/index
+	$(MAKE) -C lib/backend
 
-$(TRANSPORT_OBJ): $(TRANSPORT_SRC) $(LIB_TRANSPORT)/transport.h
-	$(CC) $(CFLAGS) -c $< -o $@
+# Integration demo
+$(DEMO): demo_integration.c $(ALL_LIBS)
+	$(CC) $(CFLAGS) $< $(BACKEND_LIB) $(INDEX_LIB) $(PROTOCOL_LIB) $(LDFLAGS) -o $@
 
-# Static library
-$(LIB_OBJMAPPER): $(FDPASS_OBJ) $(STORAGE_OBJ) $(TRANSPORT_OBJ)
-	ar rcs $@ $^
+# Test
+test: all
+	@echo "Running component tests..."
+	$(MAKE) -C lib/protocol test
+	$(MAKE) -C lib/index test
+	$(MAKE) -C lib/backend test
+	@echo "All tests passed!"
 
-# Server components
-$(SERVER_OBJ): $(SERVER_SRC) $(OBJMAPPER_INC)/objmapper.h
-	$(CC) $(CFLAGS) -c $< -o $@
-
-$(MAIN_OBJ): $(MAIN_SRC) $(OBJMAPPER_INC)/objmapper.h
-	$(CC) $(CFLAGS) -c $< -o $@
-
-# Client components
-$(CLIENT_OBJ): $(CLIENT_SRC) $(OBJMAPPER_INC)/objmapper.h
-	$(CC) $(CFLAGS) -c $< -o $@
-
-$(TEST_CLIENT_OBJ): $(TEST_CLIENT_SRC) $(OBJMAPPER_INC)/objmapper.h
-	$(CC) $(CFLAGS) -c $< -o $@
-
-# Executables
-$(OBJMAPPER_SERVER): $(SERVER_OBJ) $(MAIN_OBJ) $(LIB_OBJMAPPER)
-	$(CC) $(CFLAGS) $(SERVER_OBJ) $(MAIN_OBJ) $(LIB_OBJMAPPER) -o $@ $(LDFLAGS)
-
-$(OBJMAPPER_TEST_CLIENT): $(CLIENT_OBJ) $(TEST_CLIENT_OBJ) $(LIB_OBJMAPPER)
-	$(CC) $(CFLAGS) $(CLIENT_OBJ) $(TEST_CLIENT_OBJ) $(LIB_OBJMAPPER) -o $@ $(LDFLAGS)
-
+# Clean
 clean:
-	rm -rf $(BUILD_DIR)
+	rm -f $(DEMO)
+	$(MAKE) -C lib/protocol clean
+	$(MAKE) -C lib/index clean
+	$(MAKE) -C lib/backend clean
 
+# Install
 install: all
-	install -m 755 $(OBJMAPPER_SERVER) /usr/local/bin/
-	install -m 755 $(OBJMAPPER_TEST_CLIENT) /usr/local/bin/
-
-libs: $(LIB_OBJMAPPER)
-
-help:
-	@echo "Objmapper Build System"
-	@echo ""
-	@echo "Targets:"
-	@echo "  all                 Build all components (default)"
-	@echo "  debug               Build with debug symbols and DEBUG defined"
-	@echo "  clean               Remove all build artifacts"
-	@echo "  install             Install to /usr/local/bin"
-	@echo "  libs                Build static library only"
-	@echo "  help                Show this help"
-	@echo ""
-	@echo "Components:"
-	@echo "  lib/fdpass          File descriptor passing library"
-	@echo "  lib/storage         Object storage with URI dictionary"
-	@echo "  lib/transport       Multi-transport abstraction (Unix/TCP/UDP)"
-	@echo "  objmapper/src       Server and client implementations"
+	install -d $(DESTDIR)/usr/local/bin
+	install -m 755 $(DEMO) $(DESTDIR)/usr/local/bin/objmapper-demo
+	$(MAKE) -C lib/protocol install
+	$(MAKE) -C lib/index install
+	$(MAKE) -C lib/backend install
