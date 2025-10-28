@@ -1,0 +1,202 @@
+/**
+ * @file example_server.c
+ * @brief Simple example of objmapper protocol server
+ */
+
+#include "protocol.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+
+static int create_server_socket(const char *socket_path) {
+    /* Remove existing socket */
+    unlink(socket_path);
+    
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        perror("socket");
+        return -1;
+    }
+    
+    struct sockaddr_un addr = {0};
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, socket_path, sizeof(addr.sun_path) - 1);
+    
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        perror("bind");
+        close(fd);
+        return -1;
+    }
+    
+    if (listen(fd, 5) < 0) {
+        perror("listen");
+        close(fd);
+        return -1;
+    }
+    
+    return fd;
+}
+
+static void handle_request(objm_connection_t *conn, objm_request_t *req) {
+    printf("  Request: id=%u, mode=%c (%s), uri=%s\n",
+           req->id, req->mode, objm_mode_name(req->mode), req->uri);
+    
+    /* Simple file lookup - just try to open the URI as a file path */
+    int file_fd = open(req->uri, O_RDONLY);
+    if (file_fd < 0) {
+        /* File not found */
+        objm_server_send_error(conn, req->id, OBJM_STATUS_NOT_FOUND,
+                              strerror(errno));
+        printf("  Response: NOT_FOUND (%s)\n", strerror(errno));
+        return;
+    }
+    
+    /* Get file size */
+    struct stat st;
+    if (fstat(file_fd, &st) < 0) {
+        close(file_fd);
+        objm_server_send_error(conn, req->id, OBJM_STATUS_STORAGE_ERROR,
+                              "fstat failed");
+        printf("  Response: STORAGE_ERROR\n");
+        return;
+    }
+    
+    /* Build metadata */
+    uint8_t *metadata = objm_metadata_create(100);
+    size_t meta_len = 0;
+    
+    meta_len = objm_metadata_add_size(metadata, meta_len, st.st_size);
+    meta_len = objm_metadata_add_mtime(metadata, meta_len, st.st_mtime);
+    meta_len = objm_metadata_add_backend(metadata, meta_len, 1);  /* Backend 1 = local disk */
+    
+    /* Build response */
+    objm_response_t resp = {
+        .request_id = req->id,
+        .status = OBJM_STATUS_OK,
+        .metadata = metadata,
+        .metadata_len = meta_len,
+    };
+    
+    if (req->mode == OBJM_MODE_FDPASS) {
+        /* FD pass mode - send file descriptor */
+        resp.fd = file_fd;
+        resp.content_len = 0;
+    } else {
+        /* Copy/splice mode - send content length (actual data transfer not implemented) */
+        resp.fd = -1;
+        resp.content_len = st.st_size;
+        close(file_fd);
+    }
+    
+    printf("  Response: OK, size=%lu bytes, mode=%s\n",
+           st.st_size, objm_mode_name(req->mode));
+    
+    if (objm_server_send_response(conn, &resp) < 0) {
+        fprintf(stderr, "  Failed to send response\n");
+    }
+    
+    free(metadata);
+    
+    /* Note: resp.fd is closed by objm_response_free, but we manage it ourselves */
+    if (req->mode == OBJM_MODE_FDPASS) {
+        close(file_fd);
+    }
+}
+
+static void handle_client(int client_fd) {
+    printf("New client connected (fd=%d)\n", client_fd);
+    
+    /* Create server connection */
+    objm_connection_t *conn = objm_server_create(client_fd);
+    if (!conn) {
+        fprintf(stderr, "Failed to create server connection\n");
+        return;
+    }
+    
+    /* Perform handshake and detect protocol version */
+    objm_hello_t hello = {
+        .capabilities = OBJM_CAP_OOO_REPLIES | OBJM_CAP_PIPELINING,
+        .max_pipeline = 100,
+        .backend_parallelism = 3  /* SSD, NFS, S3 */
+    };
+    
+    objm_params_t params;
+    if (objm_server_handshake(conn, &hello, &params) < 0) {
+        fprintf(stderr, "Handshake failed\n");
+        objm_server_destroy(conn);
+        return;
+    }
+    
+    char cap_str[256];
+    objm_capability_names(params.capabilities, cap_str, sizeof(cap_str));
+    printf("Negotiated: version=%d, caps=%s, pipeline=%d\n",
+           params.version, cap_str, params.max_pipeline);
+    
+    /* Process requests in a loop */
+    while (1) {
+        objm_request_t *req = NULL;
+        int ret = objm_server_recv_request(conn, &req);
+        
+        if (ret < 0) {
+            fprintf(stderr, "Failed to receive request\n");
+            break;
+        }
+        
+        if (ret == 1) {
+            /* Client requested close */
+            printf("Client requested close\n");
+            objm_server_send_close_ack(conn, 0);
+            break;
+        }
+        
+        /* Handle request */
+        handle_request(conn, req);
+        
+        objm_request_free(req);
+    }
+    
+    objm_server_destroy(conn);
+    printf("Client disconnected\n");
+}
+
+int main(int argc, char **argv) {
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s <socket_path>\n", argv[0]);
+        return 1;
+    }
+    
+    const char *socket_path = argv[1];
+    
+    /* Create server socket */
+    int server_fd = create_server_socket(socket_path);
+    if (server_fd < 0) {
+        return 1;
+    }
+    
+    printf("Server listening on %s\n", socket_path);
+    
+    /* Accept clients in a loop */
+    while (1) {
+        int client_fd = accept(server_fd, NULL, NULL);
+        if (client_fd < 0) {
+            if (errno == EINTR) continue;
+            perror("accept");
+            break;
+        }
+        
+        /* Handle client (in this simple example, one at a time) */
+        handle_client(client_fd);
+        close(client_fd);
+    }
+    
+    close(server_fd);
+    unlink(socket_path);
+    
+    return 0;
+}
