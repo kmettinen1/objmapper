@@ -12,6 +12,10 @@ client
 bridge
 objmapper-server
 objmapper-test-client
+benchmark
+simple_bench
+debug_fd
+demo_integration
 
 # Debug files
 *.dSYM/

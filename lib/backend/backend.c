@@ -346,7 +346,7 @@ int backend_create_object(backend_manager_t *mgr,
     }
     
     /* Create file */
-    int fd = open(fs_path, O_RDWR | O_CREAT | O_EXCL, 0644);
+    int fd = open(fs_path, O_RDWR | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) {
         pthread_rwlock_unlock(&backend->rwlock);
         return -1;

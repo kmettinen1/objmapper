@@ -32,8 +32,13 @@
 #define MAX_CONCURRENT_CLIENTS 64
 
 /* Backend configuration */
+/* Can be overridden for benchmarking with smaller limits */
+#ifndef MEMORY_CACHE_SIZE
 #define MEMORY_CACHE_SIZE (4ULL * 1024 * 1024 * 1024)   /* 4GB */
+#endif
+#ifndef PERSISTENT_SIZE
 #define PERSISTENT_SIZE   (100ULL * 1024 * 1024 * 1024) /* 100GB */
+#endif
 #define CACHE_CHECK_INTERVAL_US (1000000)  /* 1 second */
 #define CACHE_HOTNESS_THRESHOLD 0.7
 
@@ -191,7 +196,7 @@ static int handle_delete(objm_connection_t *conn, const objm_request_t *req) {
             .request_id = req->id,
             .status = OBJM_STATUS_OK,
             .fd = -1,
-            .content_len = 0,
+            .content_len = 1,  /* Non-zero to indicate no FD in response */
             .metadata = NULL,
             .metadata_len = 0,
             .error_msg = NULL

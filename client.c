@@ -52,7 +52,7 @@ static int cmd_put(objm_connection_t *conn, const char *uri, const char *source_
     }
     
     if (resp->status != OBJM_STATUS_OK) {
-        fprintf(stderr, "PUT failed: %s\n",
+        fprintf(stderr, "PUT failed (status=%d): %s\n", resp->status,
                 resp->error_msg ? resp->error_msg : "Unknown error");
         objm_response_free(resp);
         return -1;
