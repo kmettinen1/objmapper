@@ -1,7 +1,7 @@
 # Makefile for objmapper index library
 
 CC = gcc
-CFLAGS = -Wall -Wextra -O2 -fPIC -I. -pthread -std=gnu11
+CFLAGS = -Wall -Wextra -O2 -fPIC -I. -I../../include -pthread -std=gnu11
 LDFLAGS = -pthread -lm
 
 # Library

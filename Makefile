@@ -2,7 +2,7 @@
 # Integrated build system for new architecture
 
 CC = gcc
-CFLAGS = -Wall -Wextra -O2 -I. -Ilib/protocol -Ilib/index -Ilib/backend -pthread -std=gnu11
+CFLAGS = -Wall -Wextra -O2 -I. -Iinclude -Ilib/protocol -Ilib/index -Ilib/backend -pthread -std=gnu11
 LDFLAGS = -pthread -lm
 
 # Libraries

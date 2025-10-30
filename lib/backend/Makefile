@@ -1,7 +1,7 @@
 # Makefile for objmapper backend library
 
 CC = gcc
-CFLAGS = -Wall -Wextra -O2 -fPIC -I. -I../index -pthread -std=gnu11
+CFLAGS = -Wall -Wextra -O2 -fPIC -I. -I../index -I../../include -pthread -std=gnu11
 LDFLAGS = -pthread -lm
 SHARED_LDFLAGS = -L../index -lobjindex -Wl,-rpath,'$$ORIGIN/../index'
 
