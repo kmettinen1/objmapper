@@ -85,6 +85,7 @@ index_entry_t *index_entry_create(const char *uri, uint32_t backend_id,
     atomic_init(&entry->last_access, 0);
     atomic_init(&entry->entry_refcount, 1);  /* Start with 1 reference */
     atomic_init(&entry->next, (uintptr_t)NULL);
+    objm_payload_descriptor_init(&entry->payload);
     
     return entry;
 }
@@ -160,6 +161,22 @@ void index_entry_record_access(index_entry_t *entry) {
     
     atomic_fetch_add(&entry->access_count, 1);
     atomic_store(&entry->last_access, get_monotonic_us());
+}
+
+void index_entry_set_payload(index_entry_t *entry,
+                             const objm_payload_descriptor_t *payload) {
+    if (!entry || !payload) {
+        return;
+    }
+    objm_payload_descriptor_copy(&entry->payload, payload);
+}
+
+void index_entry_get_payload(const index_entry_t *entry,
+                             objm_payload_descriptor_t *payload_out) {
+    if (!entry || !payload_out) {
+        return;
+    }
+    objm_payload_descriptor_copy(payload_out, &entry->payload);
 }
 
 float index_calculate_hotness(const index_entry_t *entry, uint64_t current_time,

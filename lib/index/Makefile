@@ -28,7 +28,7 @@ $(LIB_SHARED): $(LIB_OBJ)
 	$(CC) -shared -o $@ $^ $(LDFLAGS)
 
 # Object files
-%.o: %.c index.h
+%.o: %.c index.h ../backend/metadata_schema.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # Test

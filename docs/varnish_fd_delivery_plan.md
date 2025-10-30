@@ -12,9 +12,9 @@ with verifiable tests.
    - Add schema validation unit tests in objmapper (`tests/test_metadata_schema.py`).
 
 2. **Baseline metrics**
-   - Instrument existing delivery path with counters for `ObjIterate` invocations,
-     response sizes, gzip usage, and ESI toggles so we can track regressions.
-   - Add varnishd unit/varnishtest cases to assert counter availability.
+    - Instrument existing delivery path with counters for `ObjIterate` invocations,
+       response sizes, gzip usage, and ESI toggles so we can track regressions.
+    - Add varnishd unit/varnishtest cases to assert counter availability.
 
 ## Phase 1 – Interface Extensions
 

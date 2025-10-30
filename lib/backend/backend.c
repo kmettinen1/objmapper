@@ -557,9 +557,53 @@ int backend_get_metadata(backend_manager_t *mgr,
     metadata_out->flags = entry->flags;
     metadata_out->hotness = entry->hotness_score;
     metadata_out->access_count = atomic_load(&entry->access_count);
+    index_entry_get_payload(entry, &metadata_out->payload);
+    metadata_out->has_payload = (metadata_out->payload.variant_count > 0);
     
     fd_ref_release(&ref);
     
+    return 0;
+}
+
+int backend_set_payload_metadata(backend_manager_t *mgr,
+                                 const char *uri,
+                                 const objm_payload_descriptor_t *payload) {
+    if (!mgr || !uri || !payload) {
+        return -1;
+    }
+
+    char error_buf[128];
+    if (objm_payload_descriptor_validate(payload, error_buf, sizeof(error_buf)) < 0) {
+        fprintf(stderr, "payload metadata invalid for %s: %s\n", uri, error_buf);
+        return -1;
+    }
+
+    fd_ref_t ref;
+    if (global_index_lookup(mgr->global_index, uri, &ref) < 0) {
+        return -1;
+    }
+
+    index_entry_set_payload(ref.entry, payload);
+
+    fd_ref_release(&ref);
+    return 0;
+}
+
+int backend_get_payload_metadata(backend_manager_t *mgr,
+                                 const char *uri,
+                                 objm_payload_descriptor_t *payload_out) {
+    if (!mgr || !uri || !payload_out) {
+        return -1;
+    }
+
+    fd_ref_t ref;
+    if (global_index_lookup(mgr->global_index, uri, &ref) < 0) {
+        return -1;
+    }
+
+    index_entry_get_payload(ref.entry, payload_out);
+
+    fd_ref_release(&ref);
     return 0;
 }
 
