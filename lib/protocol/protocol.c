@@ -743,6 +743,21 @@ size_t objm_metadata_add_backend(uint8_t *metadata, size_t current_len, uint8_t 
     return objm_metadata_add(metadata, current_len, OBJM_META_BACKEND, &backend_id, 1);
 }
 
+size_t objm_metadata_add_payload(uint8_t *metadata, size_t current_len,
+                                 const objm_payload_descriptor_t *payload) {
+    if (!metadata || !payload) {
+        return current_len;
+    }
+
+    uint8_t encoded[OBJM_PAYLOAD_DESCRIPTOR_WIRE_SIZE];
+    if (objm_payload_descriptor_encode(payload, encoded, sizeof(encoded)) < 0) {
+        return current_len;
+    }
+
+    return objm_metadata_add(metadata, current_len, OBJM_META_PAYLOAD,
+                             encoded, sizeof(encoded));
+}
+
 int objm_metadata_parse(const uint8_t *metadata, size_t metadata_len,
                         objm_metadata_entry_t **entries, size_t *num_entries) {
     if (!metadata || !entries || !num_entries) return -1;
@@ -790,6 +805,85 @@ const objm_metadata_entry_t *objm_metadata_get(const objm_metadata_entry_t *entr
         }
     }
     return NULL;
+}
+
+int objm_metadata_get_payload(const objm_metadata_entry_t *entries,
+                              size_t num_entries,
+                              objm_payload_descriptor_t *out_payload) {
+    if (!entries || !out_payload) {
+        return -1;
+    }
+
+    const objm_metadata_entry_t *entry =
+        objm_metadata_get(entries, num_entries, OBJM_META_PAYLOAD);
+    if (!entry) {
+        return 1;  /* Not found */
+    }
+
+    if (entry->length != OBJM_PAYLOAD_DESCRIPTOR_WIRE_SIZE) {
+        return -1;
+    }
+
+    memset(out_payload, 0, sizeof(*out_payload));
+    out_payload->version = OBJM_PAYLOAD_DESCRIPTOR_VERSION;
+
+    const uint8_t *p = entry->data;
+    uint32_t field32;
+    uint64_t field64;
+
+    memcpy(&field32, p, sizeof(field32));
+    out_payload->version = le32toh(field32);
+    p += sizeof(field32);
+
+    memcpy(&field32, p, sizeof(field32));
+    out_payload->variant_count = le32toh(field32);
+    p += sizeof(field32);
+
+    if (out_payload->variant_count > OBJM_MAX_VARIANTS) {
+        return -1;
+    }
+
+    memcpy(&field32, p, sizeof(field32));
+    out_payload->manifest_flags = le32toh(field32);
+    p += sizeof(field32);
+
+    memcpy(&field32, p, sizeof(field32));
+    out_payload->reserved = le32toh(field32);
+    p += sizeof(field32);
+
+    for (size_t i = 0; i < OBJM_MAX_VARIANTS; i++) {
+        objm_variant_descriptor_t *variant = &out_payload->variants[i];
+
+        memcpy(variant->variant_id, p, OBJM_VARIANT_ID_MAX);
+        variant->variant_id[OBJM_VARIANT_ID_MAX - 1] = '\0';
+        p += OBJM_VARIANT_ID_MAX;
+
+        memcpy(&field32, p, sizeof(field32));
+        variant->capabilities = le32toh(field32);
+        p += sizeof(field32);
+
+        memcpy(&field32, p, sizeof(field32));
+        variant->encoding = le32toh(field32);
+        p += sizeof(field32);
+
+        memcpy(&field64, p, sizeof(field64));
+        variant->logical_length = le64toh(field64);
+        p += sizeof(field64);
+
+        memcpy(&field64, p, sizeof(field64));
+        variant->storage_length = le64toh(field64);
+        p += sizeof(field64);
+
+        memcpy(&field64, p, sizeof(field64));
+        variant->range_granularity = le64toh(field64);
+        p += sizeof(field64);
+
+        variant->is_primary = *p++;
+        memcpy(variant->reserved, p, sizeof(variant->reserved));
+        p += sizeof(variant->reserved);
+    }
+
+    return 0;
 }
 
 void objm_metadata_free_entries(objm_metadata_entry_t *entries, size_t num_entries) {

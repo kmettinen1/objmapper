@@ -186,7 +186,12 @@ static void test_object_operations(void) {
     assert(strcmp(metadata.uri, "/test/object1.txt") == 0);
     assert(metadata.backend_id == nvme_id);
     assert(metadata.size_bytes == strlen(data));
-    assert(!metadata.has_payload);
+    assert(metadata.has_payload);
+    assert(metadata.payload.variant_count == 1);
+    assert(strcmp(metadata.payload.variants[0].variant_id, "identity") == 0);
+    assert(metadata.payload.variants[0].logical_length == strlen(data));
+    assert(metadata.payload.variants[0].storage_length == strlen(data));
+    assert(metadata.payload.variants[0].capabilities & OBJM_CAP_ZERO_COPY);
     object_metadata_free(&metadata);
     
     printf("  ✓ Metadata retrieval works\n");
@@ -213,6 +218,14 @@ static void test_object_operations(void) {
     assert(payload_out.variant_count == 1);
     assert(strcmp(payload_out.variants[0].variant_id, "identity") == 0);
     assert(payload_out.variants[0].capabilities & OBJM_CAP_ZERO_COPY);
+
+    uint8_t encoded[OBJM_PAYLOAD_DESCRIPTOR_WIRE_SIZE];
+    assert(objm_payload_descriptor_encode(&payload_out, encoded, sizeof(encoded)) == 0);
+    objm_payload_descriptor_t payload_decoded;
+    objm_payload_descriptor_init(&payload_decoded);
+    assert(objm_payload_descriptor_decode(encoded, sizeof(encoded), &payload_decoded) == 0);
+    assert(payload_decoded.variant_count == payload_out.variant_count);
+    assert(strcmp(payload_decoded.variants[0].variant_id, "identity") == 0);
 
     ret = backend_get_metadata(mgr, "/test/object1.txt", &metadata);
     assert(ret == 0);

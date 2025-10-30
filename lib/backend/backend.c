@@ -16,6 +16,14 @@
 #include <math.h>
 #include <dirent.h>
 
+static void backend_mark_index_dirty(backend_info_t *backend) {
+    if (!backend || !backend->index) {
+        return;
+    }
+
+    atomic_store(&backend->index->dirty, 1);
+}
+
 /* Helper to get monotonic time in microseconds */
 static uint64_t get_monotonic_us(void) {
     struct timespec ts;
@@ -585,6 +593,9 @@ int backend_set_payload_metadata(backend_manager_t *mgr,
 
     index_entry_set_payload(ref.entry, payload);
 
+    backend_info_t *backend = backend_manager_get_backend(mgr, ref.entry->backend_id);
+    backend_mark_index_dirty(backend);
+
     fd_ref_release(&ref);
     return 0;
 }
@@ -625,6 +636,8 @@ int backend_update_size(backend_manager_t *mgr,
     
     /* Update size difference */
     size_t old_size = ref.entry->size_bytes;
+    bool mark_dirty = (new_size != old_size);
+    bool seeded_payload = false;
     ref.entry->size_bytes = new_size;
     
     if (new_size > old_size) {
@@ -635,6 +648,15 @@ int backend_update_size(backend_manager_t *mgr,
         size_t delta = old_size - new_size;
         atomic_fetch_sub(&backend->used_bytes, delta);
         atomic_fetch_sub(&mgr->total_bytes, delta);
+    }
+
+    if (new_size > 0 && ref.entry->payload.variant_count == 0) {
+        index_entry_seed_identity_payload(ref.entry, new_size);
+        seeded_payload = true;
+    }
+
+    if (mark_dirty || seeded_payload) {
+        backend_mark_index_dirty(backend);
     }
     
     fd_ref_release(&ref);

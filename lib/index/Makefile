@@ -33,10 +33,10 @@ $(LIB_SHARED): $(LIB_OBJ)
 
 # Test
 test: $(TEST_BIN)
-	LD_LIBRARY_PATH=. ./$(TEST_BIN)
+	LD_LIBRARY_PATH=.:../backend ./$(TEST_BIN)
 
 $(TEST_BIN): $(TEST_SRC) $(LIB_STATIC)
-	$(CC) $(CFLAGS) $< -L. -lobjindex $(LDFLAGS) -o $@
+	$(CC) $(CFLAGS) $< -L. -lobjindex -L../backend -lobjbackend $(LDFLAGS) -o $@
 
 # Clean
 clean:

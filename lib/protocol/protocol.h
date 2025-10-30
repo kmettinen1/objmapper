@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <sys/types.h>
+#include <objmapper/metadata.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -77,6 +78,7 @@ extern "C" {
 #define OBJM_META_MIME      0x04  /* MIME type (variable string) */
 #define OBJM_META_BACKEND   0x05  /* Backend path ID (1 byte) */
 #define OBJM_META_LATENCY   0x06  /* Processing latency (4 bytes, μs) */
+#define OBJM_META_PAYLOAD   0x07  /* Payload descriptor blob */
 
 /* Close reasons */
 #define OBJM_CLOSE_NORMAL    0x00
@@ -408,6 +410,12 @@ size_t objm_metadata_add_mtime(uint8_t *metadata, size_t current_len, uint64_t m
 size_t objm_metadata_add_backend(uint8_t *metadata, size_t current_len, uint8_t backend_id);
 
 /**
+ * Add payload descriptor metadata
+ */
+size_t objm_metadata_add_payload(uint8_t *metadata, size_t current_len,
+                                 const objm_payload_descriptor_t *payload);
+
+/**
  * Parse metadata buffer into entries
  * 
  * @param metadata Metadata buffer
@@ -429,6 +437,18 @@ int objm_metadata_parse(const uint8_t *metadata, size_t metadata_len,
  */
 const objm_metadata_entry_t *objm_metadata_get(const objm_metadata_entry_t *entries,
                                                 size_t num_entries, uint8_t type);
+
+/**
+ * Extract payload descriptor if present.
+ *
+ * @param entries Metadata entry array
+ * @param num_entries Entry count
+ * @param out_payload Output descriptor (must be non-NULL)
+ * @return 0 on success, 1 if not found, -1 on error
+ */
+int objm_metadata_get_payload(const objm_metadata_entry_t *entries,
+                              size_t num_entries,
+                              objm_payload_descriptor_t *out_payload);
 
 /**
  * Free metadata entries

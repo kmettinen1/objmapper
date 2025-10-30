@@ -84,6 +84,23 @@ static int handle_get(objm_connection_t *conn, const objm_request_t *req) {
     
     /* For FD pass mode, send the file descriptor */
     if (req->mode == OBJM_MODE_FDPASS) {
+        uint8_t *metadata = NULL;
+        size_t metadata_len = 0;
+
+        objm_payload_descriptor_t payload;
+        objm_payload_descriptor_init(&payload);
+        if (backend_get_payload_metadata(g_backend_mgr, req->uri, &payload) == 0 &&
+            payload.variant_count > 0) {
+            metadata = objm_metadata_create(OBJM_PAYLOAD_DESCRIPTOR_WIRE_SIZE + 16);
+            if (metadata) {
+                metadata_len = objm_metadata_add_payload(metadata, 0, &payload);
+                if (metadata_len == 0) {
+                    free(metadata);
+                    metadata = NULL;
+                }
+            }
+        }
+
         /* Build response - for FD pass, content_len should be 0 
          * (client gets size from fstat on the FD) */
         objm_response_t resp = {
@@ -91,13 +108,15 @@ static int handle_get(objm_connection_t *conn, const objm_request_t *req) {
             .status = OBJM_STATUS_OK,
             .fd = ref.fd,
             .content_len = 0,  /* FD pass doesn't use content_len */
-            .metadata = NULL,
-            .metadata_len = 0,
+            .metadata = metadata,
+            .metadata_len = metadata ? metadata_len : 0,
             .error_msg = NULL
         };
         
         /* Send response with FD */
         int ret = objm_server_send_response(conn, &resp);
+
+        free(metadata);
         
         /* Release our reference (client now owns the FD) */
         fd_ref_release(&ref);

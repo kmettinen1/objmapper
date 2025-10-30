@@ -13,6 +13,7 @@
 #include <time.h>
 #include <errno.h>
 #include <math.h>
+#include <stdbool.h>
 #include <dirent.h>
 #include <endian.h>
 
@@ -177,6 +178,29 @@ void index_entry_get_payload(const index_entry_t *entry,
         return;
     }
     objm_payload_descriptor_copy(payload_out, &entry->payload);
+}
+
+void index_entry_seed_identity_payload(index_entry_t *entry,
+                                       uint64_t size_bytes) {
+    if (!entry)
+        return;
+
+    objm_payload_descriptor_t payload;
+
+    objm_payload_descriptor_init(&payload);
+    payload.variant_count = 1;
+    payload.manifest_flags = OBJM_PAYLOAD_FLAG_HAS_VARIANTS;
+
+    objm_variant_descriptor_t *variant = &payload.variants[0];
+    snprintf(variant->variant_id, OBJM_VARIANT_ID_MAX, "%s", "identity");
+    variant->capabilities = OBJM_CAP_IDENTITY | OBJM_CAP_ZERO_COPY;
+    variant->encoding = OBJM_ENCODING_IDENTITY;
+    variant->logical_length = size_bytes;
+    variant->storage_length = size_bytes;
+    variant->range_granularity = 0;
+    variant->is_primary = 1;
+
+    index_entry_set_payload(entry, &payload);
 }
 
 float index_calculate_hotness(const index_entry_t *entry, uint64_t current_time,
@@ -728,13 +752,18 @@ int backend_index_save(backend_index_t *idx) {
             uint64_t mtime_le = htole64(entry->mtime);
             uint32_t flags_le = htole32(entry->flags);
             
-            write_all(fd, &uri_len_le, sizeof(uri_len_le));
-            write_all(fd, entry->uri, uri_len);
-            write_all(fd, &path_len_le, sizeof(path_len_le));
-            write_all(fd, entry->backend_path, path_len);
-            write_all(fd, &size_le, sizeof(size_le));
-            write_all(fd, &mtime_le, sizeof(mtime_le));
-            write_all(fd, &flags_le, sizeof(flags_le));
+            if (write_all(fd, &uri_len_le, sizeof(uri_len_le)) < 0) goto error;
+            if (write_all(fd, entry->uri, uri_len) < 0) goto error;
+            if (write_all(fd, &path_len_le, sizeof(path_len_le)) < 0) goto error;
+            if (write_all(fd, entry->backend_path, path_len) < 0) goto error;
+            if (write_all(fd, &size_le, sizeof(size_le)) < 0) goto error;
+            if (write_all(fd, &mtime_le, sizeof(mtime_le)) < 0) goto error;
+            if (write_all(fd, &flags_le, sizeof(flags_le)) < 0) goto error;
+
+            uint8_t payload_buf[OBJM_PAYLOAD_DESCRIPTOR_WIRE_SIZE];
+            if (objm_payload_descriptor_encode(&entry->payload, payload_buf,
+                                               sizeof(payload_buf)) < 0) goto error;
+            if (write_all(fd, payload_buf, sizeof(payload_buf)) < 0) goto error;
             
             entry = (index_entry_t *)atomic_load(&entry->next);
         }
@@ -750,6 +779,11 @@ int backend_index_save(backend_index_t *idx) {
     
     atomic_store(&idx->dirty, 0);
     return 0;
+
+error:
+    close(fd);
+    unlink(tmp_path);
+    return -1;
 }
 
 int backend_index_load(backend_index_t *idx) {
@@ -778,13 +812,16 @@ int backend_index_load(backend_index_t *idx) {
         return -1;
     }
     
-    if (le16toh(header.version) != INDEX_VERSION) {
+    uint16_t file_version = le16toh(header.version);
+
+    if (file_version != 1 && file_version != INDEX_VERSION) {
         close(fd);
         return -1;
     }
     
     uint64_t num_entries = le64toh(header.num_entries);
     int loaded = 0;
+    bool upgraded = false;
     
     /* Read entries */
     for (uint64_t i = 0; i < num_entries; i++) {
@@ -832,13 +869,39 @@ int backend_index_load(backend_index_t *idx) {
         uint64_t size, mtime;
         uint32_t flags;
         
-        read_all(fd, &size, sizeof(size));
-        read_all(fd, &mtime, sizeof(mtime));
-        read_all(fd, &flags, sizeof(flags));
+        if (read_all(fd, &size, sizeof(size)) != sizeof(size)) {
+            index_entry_put(entry);
+            break;
+        }
+        if (read_all(fd, &mtime, sizeof(mtime)) != sizeof(mtime)) {
+            index_entry_put(entry);
+            break;
+        }
+        if (read_all(fd, &flags, sizeof(flags)) != sizeof(flags)) {
+            index_entry_put(entry);
+            break;
+        }
         
         entry->size_bytes = le64toh(size);
         entry->mtime = le64toh(mtime);
         entry->flags = le32toh(flags);
+
+        if (file_version >= 2) {
+            uint8_t payload_buf[OBJM_PAYLOAD_DESCRIPTOR_WIRE_SIZE];
+            if (read_all(fd, payload_buf, sizeof(payload_buf)) !=
+                (ssize_t)sizeof(payload_buf)) {
+                index_entry_put(entry);
+                break;
+            }
+            if (objm_payload_descriptor_decode(payload_buf, sizeof(payload_buf),
+                                               &entry->payload) < 0) {
+                index_entry_put(entry);
+                break;
+            }
+        } else {
+            index_entry_seed_identity_payload(entry, entry->size_bytes);
+            upgraded = true;
+        }
         
         /* Insert into index */
         backend_index_insert(idx, entry);
@@ -846,7 +909,7 @@ int backend_index_load(backend_index_t *idx) {
     }
     
     close(fd);
-    atomic_store(&idx->dirty, 0);
+    atomic_store(&idx->dirty, upgraded ? 1 : 0);
     
     return loaded;
 }
@@ -896,6 +959,7 @@ int backend_index_scan(backend_index_t *idx, const char *mount_path,
                 if (idx_entry) {
                     idx_entry->size_bytes = st.st_size;
                     idx_entry->flags = INDEX_FLAG_PERSISTENT;
+                    index_entry_seed_identity_payload(idx_entry, idx_entry->size_bytes);
                     
                     /* Insert into index */
                     backend_index_insert(idx, idx_entry);

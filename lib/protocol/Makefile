@@ -1,7 +1,7 @@
 # Makefile for objmapper protocol library
 
 CC = gcc
-CFLAGS = -Wall -Wextra -O2 -fPIC -I.
+CFLAGS = -Wall -Wextra -O2 -fPIC -I. -I../../include
 LDFLAGS = 
 
 # Library
@@ -18,6 +18,9 @@ EXAMPLE_SERVER = example_server
 .PHONY: all clean install examples
 
 all: $(LIB_STATIC) $(LIB_SHARED)
+
+test:
+	@echo "No protocol-specific tests"
 
 # Static library
 $(LIB_STATIC): $(LIB_OBJ)

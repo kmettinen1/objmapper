@@ -30,7 +30,7 @@ typedef struct fd_ref fd_ref_t;
 #define INDEX_DEFAULT_BUCKETS  (1024 * 1024)  /* 1M buckets */
 #define INDEX_MAX_OPEN_FDS     10000          /* Max cached FDs */
 #define INDEX_MAGIC            "OBJIDX"
-#define INDEX_VERSION          1
+#define INDEX_VERSION          2
 
 /* Object flags */
 #define INDEX_FLAG_EPHEMERAL   0x01  /* Volatile storage only */
@@ -402,6 +402,9 @@ void index_entry_set_payload(index_entry_t *entry,
 
 void index_entry_get_payload(const index_entry_t *entry,
                              objm_payload_descriptor_t *payload_out);
+
+void index_entry_seed_identity_payload(index_entry_t *entry,
+                                       uint64_t size_bytes);
 
 /* ============================================================================
  * Utility Functions
