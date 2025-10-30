@@ -11,6 +11,8 @@
 #include <stdatomic.h>
 #include <pthread.h>
 
+#include "../backend/metadata_schema.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -74,6 +76,9 @@ struct index_entry {
     
     /* Hash table linkage */
     atomic_uintptr_t next;           /* Next in collision chain (atomic for RCU) */
+
+    /* Payload metadata */
+    objm_payload_descriptor_t payload;
 };
 
 /**
@@ -391,6 +396,12 @@ void index_entry_close_fd(index_entry_t *entry);
  * @param entry Index entry
  */
 void index_entry_record_access(index_entry_t *entry);
+
+void index_entry_set_payload(index_entry_t *entry,
+                             const objm_payload_descriptor_t *payload);
+
+void index_entry_get_payload(const index_entry_t *entry,
+                             objm_payload_descriptor_t *payload_out);
 
 /* ============================================================================
  * Utility Functions

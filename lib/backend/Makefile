@@ -3,10 +3,11 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -O2 -fPIC -I. -I../index -pthread -std=gnu11
 LDFLAGS = -pthread -lm
+SHARED_LDFLAGS = -L../index -lobjindex -Wl,-rpath,'$$ORIGIN/../index'
 
 # Library
 LIB_NAME = libobjbackend
-LIB_SRC = backend.c
+LIB_SRC = backend.c metadata_schema.c
 LIB_OBJ = $(LIB_SRC:.c=.o)
 LIB_STATIC = $(LIB_NAME).a
 LIB_SHARED = $(LIB_NAME).so
@@ -27,11 +28,11 @@ $(LIB_STATIC): $(LIB_OBJ)
 	ar rcs $@ $^
 
 # Shared library
-$(LIB_SHARED): $(LIB_OBJ)
-	$(CC) -shared -o $@ $^ $(LDFLAGS)
+$(LIB_SHARED): $(LIB_OBJ) $(INDEX_LIB)
+	$(CC) -shared -o $@ $(LIB_OBJ) $(SHARED_LDFLAGS) $(LDFLAGS)
 
 # Object files
-%.o: %.c backend.h ../index/index.h
+%.o: %.c backend.h metadata_schema.h ../index/index.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # Test

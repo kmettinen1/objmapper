@@ -13,6 +13,7 @@
 #ifndef BACKEND_H
 #define BACKEND_H
 
+#include "metadata_schema.h"
 #include "../index/index.h"
 #include <stdint.h>
 #include <stdbool.h>
@@ -138,6 +139,8 @@ typedef struct object_metadata {
     uint32_t flags;
     double hotness;
     uint64_t access_count;
+    bool has_payload;
+    objm_payload_descriptor_t payload;
 } object_metadata_t;
 
 /* ============================================================================
@@ -271,6 +274,14 @@ int backend_manager_scan(backend_manager_t *mgr, int backend_id);
 int backend_get_metadata(backend_manager_t *mgr,
                          const char *uri,
                          object_metadata_t *metadata_out);
+
+int backend_set_payload_metadata(backend_manager_t *mgr,
+                                 const char *uri,
+                                 const objm_payload_descriptor_t *payload);
+
+int backend_get_payload_metadata(backend_manager_t *mgr,
+                                 const char *uri,
+                                 objm_payload_descriptor_t *payload_out);
 
 /**
  * Update object size (after write)

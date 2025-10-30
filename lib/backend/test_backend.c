@@ -186,9 +186,41 @@ static void test_object_operations(void) {
     assert(strcmp(metadata.uri, "/test/object1.txt") == 0);
     assert(metadata.backend_id == nvme_id);
     assert(metadata.size_bytes == strlen(data));
+    assert(!metadata.has_payload);
     object_metadata_free(&metadata);
     
     printf("  ✓ Metadata retrieval works\n");
+
+    objm_payload_descriptor_t payload;
+    objm_payload_descriptor_init(&payload);
+    payload.variant_count = 1;
+    payload.manifest_flags = OBJM_PAYLOAD_FLAG_HAS_VARIANTS;
+    objm_variant_descriptor_t *variant = &payload.variants[0];
+    snprintf(variant->variant_id, OBJM_VARIANT_ID_MAX, "%s", "identity");
+    variant->logical_length = strlen(data);
+    variant->storage_length = strlen(data);
+    variant->encoding = OBJM_ENCODING_IDENTITY;
+    variant->capabilities = OBJM_CAP_IDENTITY | OBJM_CAP_ZERO_COPY;
+    variant->is_primary = 1;
+
+    ret = backend_set_payload_metadata(mgr, "/test/object1.txt", &payload);
+    assert(ret == 0);
+
+    objm_payload_descriptor_t payload_out;
+    objm_payload_descriptor_init(&payload_out);
+    ret = backend_get_payload_metadata(mgr, "/test/object1.txt", &payload_out);
+    assert(ret == 0);
+    assert(payload_out.variant_count == 1);
+    assert(strcmp(payload_out.variants[0].variant_id, "identity") == 0);
+    assert(payload_out.variants[0].capabilities & OBJM_CAP_ZERO_COPY);
+
+    ret = backend_get_metadata(mgr, "/test/object1.txt", &metadata);
+    assert(ret == 0);
+    assert(metadata.has_payload);
+    assert(metadata.payload.variant_count == 1);
+    object_metadata_free(&metadata);
+    
+    printf("  ✓ Payload metadata lifecycle works\n");
     
     /* Create ephemeral object */
     object_create_req_t eph_req = {
