@@ -72,7 +72,8 @@ Client                          Server
 │   Bit 1: Supports request pipelining    │
 │   Bit 2: Supports compression (future)  │
 │   Bit 3: Supports multiplexing (future) │
-│   Bits 4-15: Reserved                   │
+│   Bit 4: Supports segmented delivery    │
+│   Bits 5-15: Reserved                   │
 ├─────────────────────────────────────────┤
 │ Max Pipeline Depth (2 bytes)            │
 │   0 = unlimited, N = max concurrent     │
@@ -138,6 +139,7 @@ Total: 6 bytes
 │   '1' = OP_FDPASS                       │
 │   '2' = OP_COPY                         │
 │   '3' = OP_SPLICE                       │
+│   '4' = OP_SEGMENTED                    │
 ├─────────────────────────────────────────┤
 │ URI Length (2 bytes, network order)     │
 ├─────────────────────────────────────────┤
@@ -165,6 +167,7 @@ Total: 3 + URI_length bytes
 │   '1' = OP_FDPASS                       │
 │   '2' = OP_COPY                         │
 │   '3' = OP_SPLICE                       │
+│   '4' = OP_SEGMENTED                    │
 ├─────────────────────────────────────────┤
 │ URI Length (2 bytes, network order)     │
 ├─────────────────────────────────────────┤
@@ -283,6 +286,10 @@ Total: 16 + metadata_length + content_length bytes
 └─────────────────────────────────────────┘
 Total: 8 + error_message_length bytes
 ```
+
+### Segmented Delivery Responses (Mode '4')
+
+Mode `'4'` extends the base response envelope with a discrete segment table so that inline bytes and descriptor-backed ranges can be interleaved inside a single message. The negotiation rules, wire layout, and interoperability expectations are defined in `docs/SEGMENTED_DELIVERY_PROTOCOL.md`. Implementations MUST advertise `OBJM_CAP_SEGMENTED_DELIVERY` during the hello exchange before attempting to use this mode.
 
 ### Status Codes
 

@@ -185,6 +185,7 @@ This library provides the foundation for:
 3. **Production server**: Replace existing objmapper server
 4. **Client library**: Replace existing client code
 5. **Benchmarking**: Validate 100K req/s target from concurrency evaluation
+6. **Segmented delivery**: Implement `OBJM_MODE_SEGMENTED` as specified in `docs/SEGMENTED_DELIVERY_PROTOCOL.md` so inline copy prefixes and FD-backed ranges can coexist.
 
 ## Files Created
 
