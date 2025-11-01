@@ -153,6 +153,8 @@ objm_server_destroy(conn);
 
 When both endpoints negotiate `OBJM_CAP_SEGMENTED_DELIVERY`, responses can carry a descriptor array describing inline blocks and zero-copy ranges. Each `objm_segment_t` entry contains the logical length, optional inline payload, and (for FD segments) the file descriptor and byte range to consume. The client API exposes parsed segments under `objm_response_t::segments`, and `objm_response_free` automatically releases any received descriptors and buffers.
 
+For testing, the reference `example_server` accepts URI hints after a `::` suffix (for example, `/tmp/file::reuse` or `/tmp/file::optional`) to exercise descriptor reuse and optional inline flags. The integration script `test_protocol.sh` demonstrates these extended scenarios.
+
 ## Metadata
 
 The library supports extensible metadata:

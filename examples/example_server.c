@@ -47,16 +47,38 @@ static void handle_request(objm_connection_t *conn, objm_request_t *req) {
     printf("  Request: id=%u, mode=%c (%s), uri=%s\n",
            req->id, req->mode, objm_mode_name(req->mode), req->uri);
 
-    objm_segment_t segments[2];
+    objm_segment_t segments[3];
     memset(segments, 0, sizeof(segments));
-    
+
+    const char *behavior = NULL;
+    const char *path_hint = NULL;
+    char *path_storage = NULL;
+
+    path_hint = strstr(req->uri, "::");
+    if (path_hint) {
+        size_t path_len = (size_t)(path_hint - req->uri);
+        path_storage = malloc(path_len + 1);
+        if (!path_storage) {
+            objm_server_send_error(conn, req->id, OBJM_STATUS_OUT_OF_MEMORY,
+                                  "Out of memory");
+            fprintf(stderr, "  Response: OUT_OF_MEMORY\n");
+            return;
+        }
+        memcpy(path_storage, req->uri, path_len);
+        path_storage[path_len] = '\0';
+        behavior = path_hint + 2;
+    }
+
+    const char *open_path = path_storage ? path_storage : req->uri;
+
     /* Simple file lookup - just try to open the URI as a file path */
-    int file_fd = open(req->uri, O_RDONLY);
+    int file_fd = open(open_path, O_RDONLY);
     if (file_fd < 0) {
         /* File not found */
         objm_server_send_error(conn, req->id, OBJM_STATUS_NOT_FOUND,
                               strerror(errno));
         printf("  Response: NOT_FOUND (%s)\n", strerror(errno));
+        free(path_storage);
         return;
     }
     
@@ -67,6 +89,7 @@ static void handle_request(objm_connection_t *conn, objm_request_t *req) {
         objm_server_send_error(conn, req->id, OBJM_STATUS_STORAGE_ERROR,
                               "fstat failed");
         printf("  Response: STORAGE_ERROR\n");
+        free(path_storage);
         return;
     }
     
@@ -115,10 +138,61 @@ static void handle_request(objm_connection_t *conn, objm_request_t *req) {
             .fd = file_fd,
         };
 
+        int reuse_segments = 0;
+        int optional_inline = 0;
+
+        if (behavior && *behavior) {
+            if (strstr(behavior, "reuse")) {
+                reuse_segments = (st.st_size > 1);
+            }
+            if (strstr(behavior, "optional")) {
+                optional_inline = 1;
+            }
+        }
+
+        if (optional_inline) {
+            segments[0].flags |= OBJM_SEG_FLAG_OPTIONAL;
+        }
+
         resp.fd = -1;
-        resp.segment_count = 2;
-        resp.segments = segments;
-        resp.content_len = segments[0].logical_length + segments[1].logical_length;
+
+        if (reuse_segments) {
+            off_t first_len = st.st_size / 2;
+            if (first_len <= 0 || first_len >= st.st_size) {
+                reuse_segments = 0;
+            }
+        }
+
+        if (reuse_segments) {
+            off_t first_len = st.st_size / 2;
+            off_t second_len = st.st_size - first_len;
+
+            segments[1].flags = 0;
+            segments[1].logical_length = first_len;
+            segments[1].storage_length = first_len;
+            segments[1].storage_offset = 0;
+
+            segments[2] = (objm_segment_t){
+                .type = OBJM_SEG_TYPE_FD,
+                .flags = OBJM_SEG_FLAG_FIN | OBJM_SEG_FLAG_REUSE_FD,
+                .copy_length = 0,
+                .logical_length = second_len,
+                .storage_offset = first_len,
+                .storage_length = second_len,
+                .inline_data = NULL,
+                .fd = file_fd,
+            };
+
+            resp.segment_count = 3;
+            resp.segments = segments;
+            resp.content_len = segments[0].logical_length +
+                                segments[1].logical_length +
+                                segments[2].logical_length;
+        } else {
+            resp.segment_count = 2;
+            resp.segments = segments;
+            resp.content_len = segments[0].logical_length + segments[1].logical_length;
+        }
 
     } else {
         /* Copy/splice mode - send content length (actual data transfer not implemented) */
@@ -143,6 +217,7 @@ static void handle_request(objm_connection_t *conn, objm_request_t *req) {
     }
     
     free(metadata);
+    free(path_storage);
     
     /* Note: resp.fd is closed by objm_response_free, but we manage it ourselves */
     if (req->mode == OBJM_MODE_FDPASS || req->mode == OBJM_MODE_SEGMENTED) {
