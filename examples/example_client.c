@@ -34,7 +34,7 @@ static int connect_to_server(const char *socket_path) {
 int main(int argc, char **argv) {
     if (argc < 3) {
         fprintf(stderr, "Usage: %s <socket_path> <uri> [mode]\n", argv[0]);
-        fprintf(stderr, "  mode: 1=fdpass (default), 2=copy, 3=splice\n");
+        fprintf(stderr, "  mode: 1=fdpass (default), 2=copy, 3=splice, 4=segmented\n");
         return 1;
     }
     
@@ -60,7 +60,8 @@ int main(int argc, char **argv) {
     
     /* Send HELLO and negotiate capabilities */
     objm_hello_t hello = {
-        .capabilities = OBJM_CAP_OOO_REPLIES | OBJM_CAP_PIPELINING,
+        .capabilities = OBJM_CAP_OOO_REPLIES | OBJM_CAP_PIPELINING |
+                        OBJM_CAP_SEGMENTED_DELIVERY,
         .max_pipeline = 100,
         .backend_parallelism = 0  /* Client field, unused */
     };
@@ -75,8 +76,12 @@ int main(int argc, char **argv) {
     
     char cap_str[256];
     objm_capability_names(params.capabilities, cap_str, sizeof(cap_str));
-    printf("Negotiated: version=%d, caps=%s, pipeline=%d, backends=%d\n",
-           params.version, cap_str, params.max_pipeline, params.backend_parallelism);
+    printf("Negotiated: version=%d, caps=0x%04x (%s), pipeline=%d, backends=%d\n",
+        params.version, params.capabilities, cap_str, params.max_pipeline,
+        params.backend_parallelism);
+    if (params.capabilities & OBJM_CAP_SEGMENTED_DELIVERY) {
+        printf("  Segmented delivery enabled\n");
+    }
     
     /* Send request */
     objm_request_t req = {
@@ -110,7 +115,33 @@ int main(int argc, char **argv) {
            resp->request_id, objm_status_name(resp->status));
     
     if (resp->status == OBJM_STATUS_OK) {
-        if (resp->fd >= 0) {
+        if (resp->segment_count > 0) {
+            printf("  Segmented payload: %u segments, total=%zu bytes\n",
+                   resp->segment_count, resp->content_len);
+
+            for (uint16_t i = 0; i < resp->segment_count; i++) {
+                const objm_segment_t *seg = &resp->segments[i];
+                const char *type_name = (seg->type == OBJM_SEG_TYPE_INLINE) ? "inline" :
+                                        (seg->type == OBJM_SEG_TYPE_FD) ? "fd" :
+                                        (seg->type == OBJM_SEG_TYPE_SPLICE) ? "splice" : "unknown";
+
+                printf("    [%u] %s len=%lu flags=0x%02x\n",
+                       i, type_name, seg->logical_length, seg->flags);
+
+                if (seg->type == OBJM_SEG_TYPE_INLINE && seg->inline_data) {
+                    printf("        data: %.*s\n", (int)seg->copy_length, seg->inline_data);
+                } else if ((seg->type == OBJM_SEG_TYPE_FD || seg->type == OBJM_SEG_TYPE_SPLICE) && seg->fd >= 0) {
+                    off_t size = lseek(seg->fd, 0, SEEK_END);
+                    if (size >= 0) {
+                        printf("        fd=%d size=%ld bytes\n", seg->fd, size);
+                        lseek(seg->fd, seg->storage_offset, SEEK_SET);
+                    } else {
+                        printf("        fd=%d offset=%lu length=%lu\n",
+                               seg->fd, seg->storage_offset, seg->storage_length);
+                    }
+                }
+            }
+        } else if (resp->fd >= 0) {
             /* FD pass mode - got a file descriptor */
             printf("  Received FD: %d\n", resp->fd);
             
@@ -123,8 +154,7 @@ int main(int argc, char **argv) {
             /* Copy/splice mode - got content length */
             printf("  Content length: %zu bytes\n", resp->content_len);
         }
-        
-        /* Parse metadata if present */
+
         if (resp->metadata_len > 0) {
             objm_metadata_entry_t *entries = NULL;
             size_t num_entries = 0;

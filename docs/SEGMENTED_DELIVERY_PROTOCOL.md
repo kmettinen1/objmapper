@@ -6,7 +6,7 @@ Define a backward-compatible extension to the objmapper wire protocol that allow
 
 ## Design Goals
 
-- Preserve existing OBJM protocol framing and message types.
+- Minimise churn to the base framing while introducing a dedicated message type.
 - Negotiate support explicitly so legacy peers fall back to copy/FD modes.
 - Allow responses to interleave small copied prefixes (headers) and large zero-copy ranges.
 - Keep per-segment metadata fixed-size to simplify preallocation and validation.
@@ -28,12 +28,12 @@ Servers MAY choose segmented delivery even when the client sends copy/splice mod
 
 ## Response Wire Format
 
-Segmented responses reuse the existing V2 response envelope and add a segment table ahead of payload bytes.
+Segmented responses use a dedicated message type and extend the V2 response envelope with a segment table ahead of payload bytes.
 
 ```
 Field                         Size   Notes
 -----                         ----   -----
-Message Type                  1      0x02 (RESPONSE)
+Message Type                  1      0x05 (SEGMENTED_RESPONSE)
 Request ID                    4      Network byte order
 Status                        1      0x00 for success
 Segment Count                 2      Network byte order (0 disallowed)
@@ -109,7 +109,7 @@ Segments appear strictly in transmission order and MUST be concatenated to form 
 - The parser can allocate a vector sized by `segment_count` and reuse it for both metadata hints and live responses.
 - Client libraries should surface segments to callers that can act on zero-copy ranges (e.g., hand the FD to sendfile) while also providing a simple fallback path that stitches the segments into a contiguous buffer.
 - Servers that already synthesize HTTP headers can expose them as the first inline segment, followed by one or more FD ranges for the body.
-- To limit memory pressure recommended `segment_count` maximum is 64; exceeding this should trigger `OBJM_STATUS_INVALID_REQUEST`.
+- To limit memory pressure the reference implementation enforces `segment_count <= 64`; exceeding this triggers `OBJM_STATUS_INVALID_REQUEST`.
 
 ## Testing Strategy
 

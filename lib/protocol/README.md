@@ -11,6 +11,7 @@ Simple, efficient C library implementing the objmapper wire protocol for persist
 - **FD Passing**: Efficient file descriptor passing over Unix sockets
 - **Metadata Support**: Extensible metadata system
 - **Capability Negotiation**: Automatic feature detection and negotiation
+- **Segmented Delivery**: Mix inline bytes and zero-copy file descriptors in one response
 
 ## Quick Start
 
@@ -50,7 +51,8 @@ objm_connection_t *conn = objm_client_create(socket_fd, OBJM_PROTO_V2);
 
 /* Handshake (V2 only) */
 objm_hello_t hello = {
-    .capabilities = OBJM_CAP_OOO_REPLIES | OBJM_CAP_PIPELINING,
+    .capabilities = OBJM_CAP_OOO_REPLIES | OBJM_CAP_PIPELINING |
+                    OBJM_CAP_SEGMENTED_DELIVERY,
     .max_pipeline = 100
 };
 objm_client_hello(conn, &hello, NULL);
@@ -88,7 +90,8 @@ objm_connection_t *conn = objm_server_create(client_fd);
 
 /* Handshake (auto-detects V1 or V2) */
 objm_hello_t hello = {
-    .capabilities = OBJM_CAP_OOO_REPLIES | OBJM_CAP_PIPELINING,
+    .capabilities = OBJM_CAP_OOO_REPLIES | OBJM_CAP_PIPELINING |
+                    OBJM_CAP_SEGMENTED_DELIVERY,
     .max_pipeline = 100,
     .backend_parallelism = 3
 };
@@ -144,6 +147,11 @@ objm_server_destroy(conn);
 - `OBJM_MODE_FDPASS` ('1'): Pass file descriptor (zero-copy)
 - `OBJM_MODE_COPY` ('2'): Copy data through socket
 - `OBJM_MODE_SPLICE` ('3'): Splice data (kernel-assisted copy)
+- `OBJM_MODE_SEGMENTED` ('4'): Stream ordered segments (inline + FD ranges)
+
+### Segmented Responses
+
+When both endpoints negotiate `OBJM_CAP_SEGMENTED_DELIVERY`, responses can carry a descriptor array describing inline blocks and zero-copy ranges. Each `objm_segment_t` entry contains the logical length, optional inline payload, and (for FD segments) the file descriptor and byte range to consume. The client API exposes parsed segments under `objm_response_t::segments`, and `objm_response_free` automatically releases any received descriptors and buffers.
 
 ## Metadata
 

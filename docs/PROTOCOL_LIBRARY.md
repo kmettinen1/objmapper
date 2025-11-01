@@ -30,6 +30,7 @@ Created a complete, production-ready implementation of the objmapper wire protoc
 - Automatic protocol version detection (server)
 - Extensible metadata system
 - Clean resource management
+- Segmented delivery (`OBJM_MODE_SEGMENTED`) combining inline prefixes with FD-backed ranges
 
 ### Examples
 
@@ -185,7 +186,7 @@ This library provides the foundation for:
 3. **Production server**: Replace existing objmapper server
 4. **Client library**: Replace existing client code
 5. **Benchmarking**: Validate 100K req/s target from concurrency evaluation
-6. **Segmented delivery**: Implement `OBJM_MODE_SEGMENTED` as specified in `docs/SEGMENTED_DELIVERY_PROTOCOL.md` so inline copy prefixes and FD-backed ranges can coexist.
+6. **Segmented delivery**: Wire the shared API into Varnish/H2O front-ends and broaden tests beyond the example harness.
 
 ## Files Created
 

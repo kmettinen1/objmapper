@@ -20,6 +20,8 @@ echo "Hello from objmapper protocol test!" > "$TEST_FILE"
 
 cd lib/protocol
 
+export LD_LIBRARY_PATH="$(pwd):${LD_LIBRARY_PATH:-}"
+
 echo "Starting server..."
 ./example_server "$SOCKET" &
 SERVER_PID=$!
@@ -29,6 +31,9 @@ sleep 1
 
 echo "Running client test..."
 ./example_client "$SOCKET" "$TEST_FILE" 1
+
+echo "Running segmented client test..."
+./example_client "$SOCKET" "$TEST_FILE" 4
 
 echo ""
 echo "Test completed successfully!"

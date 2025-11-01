@@ -46,6 +46,9 @@ static int create_server_socket(const char *socket_path) {
 static void handle_request(objm_connection_t *conn, objm_request_t *req) {
     printf("  Request: id=%u, mode=%c (%s), uri=%s\n",
            req->id, req->mode, objm_mode_name(req->mode), req->uri);
+
+    objm_segment_t segments[2];
+    memset(segments, 0, sizeof(segments));
     
     /* Simple file lookup - just try to open the URI as a file path */
     int file_fd = open(req->uri, O_RDONLY);
@@ -87,6 +90,36 @@ static void handle_request(objm_connection_t *conn, objm_request_t *req) {
         /* FD pass mode - send file descriptor */
         resp.fd = file_fd;
         resp.content_len = 0;
+    } else if (req->mode == OBJM_MODE_SEGMENTED) {
+        static const char inline_prefix[] = "inline-prelude:\n";
+
+        segments[0] = (objm_segment_t){
+            .type = OBJM_SEG_TYPE_INLINE,
+            .flags = 0,
+            .copy_length = sizeof(inline_prefix) - 1,
+            .logical_length = sizeof(inline_prefix) - 1,
+            .storage_offset = 0,
+            .storage_length = sizeof(inline_prefix) - 1,
+            .inline_data = (uint8_t *)inline_prefix,
+            .fd = -1,
+        };
+
+        segments[1] = (objm_segment_t){
+            .type = OBJM_SEG_TYPE_FD,
+            .flags = OBJM_SEG_FLAG_FIN,
+            .copy_length = 0,
+            .logical_length = st.st_size,
+            .storage_offset = 0,
+            .storage_length = st.st_size,
+            .inline_data = NULL,
+            .fd = file_fd,
+        };
+
+        resp.fd = -1;
+        resp.segment_count = 2;
+        resp.segments = segments;
+        resp.content_len = segments[0].logical_length + segments[1].logical_length;
+
     } else {
         /* Copy/splice mode - send content length (actual data transfer not implemented) */
         resp.fd = -1;
@@ -94,17 +127,25 @@ static void handle_request(objm_connection_t *conn, objm_request_t *req) {
         close(file_fd);
     }
     
-    printf("  Response: OK, size=%lu bytes, mode=%s\n",
-           st.st_size, objm_mode_name(req->mode));
+    if (req->mode == OBJM_MODE_SEGMENTED) {
+        printf("  Response: OK, segments=%u, total=%zu bytes\n",
+               resp.segment_count, resp.content_len);
+    } else {
+        printf("  Response: OK, size=%lu bytes, mode=%s\n",
+               st.st_size, objm_mode_name(req->mode));
+    }
     
     if (objm_server_send_response(conn, &resp) < 0) {
-        fprintf(stderr, "  Failed to send response\n");
+        const char *err = objm_last_error(conn);
+        fprintf(stderr, "  Failed to send response%s%s\n",
+                err ? ": " : "",
+                err ? err : "");
     }
     
     free(metadata);
     
     /* Note: resp.fd is closed by objm_response_free, but we manage it ourselves */
-    if (req->mode == OBJM_MODE_FDPASS) {
+    if (req->mode == OBJM_MODE_FDPASS || req->mode == OBJM_MODE_SEGMENTED) {
         close(file_fd);
     }
 }
@@ -121,7 +162,8 @@ static void handle_client(int client_fd) {
     
     /* Perform handshake and detect protocol version */
     objm_hello_t hello = {
-        .capabilities = OBJM_CAP_OOO_REPLIES | OBJM_CAP_PIPELINING,
+        .capabilities = OBJM_CAP_OOO_REPLIES | OBJM_CAP_PIPELINING |
+                        OBJM_CAP_SEGMENTED_DELIVERY,
         .max_pipeline = 100,
         .backend_parallelism = 3  /* SSD, NFS, S3 */
     };
@@ -135,8 +177,11 @@ static void handle_client(int client_fd) {
     
     char cap_str[256];
     objm_capability_names(params.capabilities, cap_str, sizeof(cap_str));
-    printf("Negotiated: version=%d, caps=%s, pipeline=%d\n",
-           params.version, cap_str, params.max_pipeline);
+    printf("Negotiated: version=%d, caps=0x%04x (%s), pipeline=%d\n",
+        params.version, params.capabilities, cap_str, params.max_pipeline);
+    if (params.capabilities & OBJM_CAP_SEGMENTED_DELIVERY) {
+        printf("  Segmented delivery enabled\n");
+    }
     
     /* Process requests in a loop */
     while (1) {

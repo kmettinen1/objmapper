@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <limits.h>
 #include <endian.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
@@ -139,6 +140,282 @@ static void set_error(objm_connection_t *conn, const char *fmt, ...) {
     va_end(args);
 }
 
+static void free_segments(objm_segment_t *segments, uint16_t count) {
+    if (!segments) {
+        return;
+    }
+
+    for (uint16_t i = 0; i < count; i++) {
+        if (segments[i].owns_fd && segments[i].fd >= 0) {
+            close(segments[i].fd);
+        }
+        free(segments[i].inline_data);
+        segments[i].inline_data = NULL;
+    }
+
+    free(segments);
+}
+
+static int recv_segmented_payload(objm_connection_t *conn, objm_response_t *resp,
+                                  uint16_t segment_count) {
+    if (!conn || !resp) {
+        return -1;
+    }
+
+    if (segment_count == 0 || segment_count > OBJM_MAX_SEGMENTS) {
+        set_error(conn, "Invalid segment count: %u", segment_count);
+        return -1;
+    }
+
+    size_t table_len = (size_t)segment_count * OBJM_SEGMENT_HEADER_WIRE_SIZE;
+    uint8_t *table = malloc(table_len);
+    if (!table) {
+        set_error(conn, "Failed to allocate segment table");
+        return -1;
+    }
+
+    if (recv_all(conn->fd, table, table_len) < 0) {
+        free(table);
+        set_error(conn, "Failed to receive segment table");
+        return -1;
+    }
+
+    objm_segment_t *segments = calloc(segment_count, sizeof(*segments));
+    if (!segments) {
+        free(table);
+        set_error(conn, "Failed to allocate segment array");
+        return -1;
+    }
+
+    resp->segments = segments;
+    resp->segment_count = segment_count;
+    resp->content_len = 0;
+
+    for (uint16_t i = 0; i < segment_count; i++) {
+        const uint8_t *entry = table + (size_t)i * OBJM_SEGMENT_HEADER_WIRE_SIZE;
+        objm_segment_t *seg = &segments[i];
+
+        seg->type = entry[0];
+        seg->flags = entry[1];
+        seg->copy_length = ntohl(*(const uint32_t *)(entry + 4));
+        seg->logical_length = be64toh(*(const uint64_t *)(entry + 8));
+        seg->storage_offset = be64toh(*(const uint64_t *)(entry + 16));
+        seg->storage_length = be64toh(*(const uint64_t *)(entry + 24));
+        seg->fd = -1;
+        seg->owns_fd = 0;
+
+        switch (seg->type) {
+            case OBJM_SEG_TYPE_INLINE:
+                if (seg->copy_length != seg->logical_length) {
+                    free(table);
+                    set_error(conn, "Inline segment length mismatch");
+                    goto error;
+                }
+                break;
+            case OBJM_SEG_TYPE_FD:
+            case OBJM_SEG_TYPE_SPLICE:
+                if (seg->copy_length != 0) {
+                    free(table);
+                    set_error(conn, "Copy length must be zero for FD segments");
+                    goto error;
+                }
+                if (seg->storage_length < seg->logical_length) {
+                    free(table);
+                    set_error(conn, "Storage length < logical length");
+                    goto error;
+                }
+                break;
+            default:
+                free(table);
+                set_error(conn, "Unknown segment type: %u", seg->type);
+                goto error;
+        }
+
+        resp->content_len += seg->logical_length;
+    }
+
+    free(table);
+
+    /* Receive inline payloads */
+    for (uint16_t i = 0; i < segment_count; i++) {
+        objm_segment_t *seg = &segments[i];
+        if (seg->type != OBJM_SEG_TYPE_INLINE || seg->copy_length == 0) {
+            continue;
+        }
+
+        seg->inline_data = malloc(seg->copy_length);
+        if (!seg->inline_data) {
+            set_error(conn, "Failed to allocate inline segment payload");
+            goto error;
+        }
+
+        if (recv_all(conn->fd, seg->inline_data, seg->copy_length) < 0) {
+            set_error(conn, "Failed to receive inline segment payload");
+            goto error;
+        }
+    }
+
+    /* Receive file descriptors */
+    int last_fd = -1;
+    for (uint16_t i = 0; i < segment_count; i++) {
+        objm_segment_t *seg = &segments[i];
+
+        if (seg->type != OBJM_SEG_TYPE_FD && seg->type != OBJM_SEG_TYPE_SPLICE) {
+            continue;
+        }
+
+        if (seg->flags & OBJM_SEG_FLAG_REUSE_FD) {
+            if (last_fd < 0) {
+                set_error(conn, "FD reuse without prior descriptor");
+                goto error;
+            }
+            seg->fd = last_fd;
+            seg->owns_fd = 0;
+            continue;
+        }
+
+        int fd = recv_fd(conn->fd);
+        if (fd < 0) {
+            set_error(conn, "Failed to receive file descriptor");
+            goto error;
+        }
+        seg->fd = fd;
+        seg->owns_fd = 1;
+        last_fd = fd;
+    }
+
+    if (!(segments[segment_count - 1].flags & OBJM_SEG_FLAG_FIN)) {
+        set_error(conn, "Final segment missing FIN flag");
+        goto error;
+    }
+
+    return 0;
+
+error:
+    free_segments(segments, segment_count);
+    resp->segments = NULL;
+    resp->segment_count = 0;
+    resp->content_len = 0;
+    return -1;
+}
+
+static int send_segmented_payload(objm_connection_t *conn, const objm_response_t *resp) {
+    if (!conn || !resp || resp->segment_count == 0 || !resp->segments) {
+        set_error(conn, "Invalid segmented response");
+        return -1;
+    }
+
+    if (resp->segment_count > OBJM_MAX_SEGMENTS) {
+        set_error(conn, "Segment count exceeds limit");
+        return -1;
+    }
+
+    size_t table_len = (size_t)resp->segment_count * OBJM_SEGMENT_HEADER_WIRE_SIZE;
+    uint8_t *table = malloc(table_len);
+    if (!table) {
+        set_error(conn, "Failed to allocate segment table");
+        return -1;
+    }
+
+    int last_fd = -1;
+
+    for (uint16_t i = 0; i < resp->segment_count; i++) {
+        const objm_segment_t *seg = &resp->segments[i];
+        uint8_t *entry = table + (size_t)i * OBJM_SEGMENT_HEADER_WIRE_SIZE;
+
+        entry[0] = seg->type;
+        entry[1] = seg->flags;
+        entry[2] = entry[3] = 0;
+        *(uint32_t *)(entry + 4) = htonl(seg->copy_length);
+        *(uint64_t *)(entry + 8) = htobe64(seg->logical_length);
+        *(uint64_t *)(entry + 16) = htobe64(seg->storage_offset);
+        *(uint64_t *)(entry + 24) = htobe64(seg->storage_length);
+
+        switch (seg->type) {
+            case OBJM_SEG_TYPE_INLINE:
+                if (seg->copy_length != seg->logical_length) {
+                    free(table);
+                    set_error(conn, "Inline segment length mismatch");
+                    return -1;
+                }
+                if (seg->copy_length && !seg->inline_data) {
+                    free(table);
+                    set_error(conn, "Inline segment missing payload");
+                    return -1;
+                }
+                break;
+            case OBJM_SEG_TYPE_FD:
+            case OBJM_SEG_TYPE_SPLICE:
+                if (!(seg->flags & OBJM_SEG_FLAG_REUSE_FD)) {
+                    if (seg->fd < 0) {
+                        free(table);
+                        set_error(conn, "Segment missing file descriptor");
+                        return -1;
+                    }
+                    last_fd = seg->fd;
+                } else if (last_fd < 0) {
+                    free(table);
+                    set_error(conn, "FD reuse without prior descriptor");
+                    return -1;
+                }
+                break;
+            default:
+                free(table);
+                set_error(conn, "Unknown segment type: %u", seg->type);
+                return -1;
+        }
+    }
+
+    if (!(resp->segments[resp->segment_count - 1].flags & OBJM_SEG_FLAG_FIN)) {
+        free(table);
+        set_error(conn, "Final segment missing FIN flag");
+        return -1;
+    }
+
+    if (send_all(conn->fd, table, table_len) < 0) {
+        free(table);
+        return -1;
+    }
+    free(table);
+
+    /* Send inline payloads */
+    for (uint16_t i = 0; i < resp->segment_count; i++) {
+        const objm_segment_t *seg = &resp->segments[i];
+        if (seg->type != OBJM_SEG_TYPE_INLINE || seg->copy_length == 0) {
+            continue;
+        }
+
+        if (send_all(conn->fd, seg->inline_data, seg->copy_length) < 0) {
+            return -1;
+        }
+    }
+
+    /* Send file descriptors */
+    last_fd = -1;
+    for (uint16_t i = 0; i < resp->segment_count; i++) {
+        const objm_segment_t *seg = &resp->segments[i];
+
+        if (seg->type != OBJM_SEG_TYPE_FD && seg->type != OBJM_SEG_TYPE_SPLICE) {
+            continue;
+        }
+
+        if (seg->flags & OBJM_SEG_FLAG_REUSE_FD) {
+            if (last_fd < 0) {
+                set_error(conn, "FD reuse without prior descriptor");
+                return -1;
+            }
+            continue;
+        }
+
+        if (send_fd(conn->fd, seg->fd) < 0) {
+            return -1;
+        }
+        last_fd = seg->fd;
+    }
+
+    return 0;
+}
+
 /* ============================================================================
  * Client API
  * ============================================================================ */
@@ -253,47 +530,75 @@ int objm_client_send_request(objm_connection_t *conn, const objm_request_t *req)
 }
 
 int objm_client_recv_response(objm_connection_t *conn, objm_response_t **resp) {
-    if (!conn || !resp) return -1;
-    
+    if (!conn || !resp) {
+        return -1;
+    }
+
     objm_response_t *r = calloc(1, sizeof(*r));
-    if (!r) return -1;
-    
+    if (!r) {
+        return -1;
+    }
+
     r->fd = -1;
-    
+
+    int is_segmented = 0;
+    uint16_t segment_count = 0;
+
     if (conn->version == OBJM_PROTO_V1) {
-        /* V1: status(1) + content_len(8) + metadata_len(2) */
         uint8_t header[11];
         if (recv_all(conn->fd, header, sizeof(header)) < 0) {
             free(r);
             set_error(conn, "Failed to receive V1 response header");
             return -1;
         }
-        
+
         r->status = header[0];
         r->content_len = be64toh(*(uint64_t *)(header + 1));
         r->metadata_len = ntohs(*(uint16_t *)(header + 9));
     } else {
-        /* V2: msg_type(1) + request_id(4) + status(1) + content_len(8) + metadata_len(2) */
-        uint8_t header[16];
-        if (recv_all(conn->fd, header, sizeof(header)) < 0) {
+        uint8_t base[6];
+        if (recv_all(conn->fd, base, sizeof(base)) < 0) {
             free(r);
             set_error(conn, "Failed to receive V2 response header");
             return -1;
         }
-        
-        if (header[0] != OBJM_MSG_RESPONSE) {
+
+        uint8_t msg_type = base[0];
+        r->request_id = ntohl(*(uint32_t *)(base + 1));
+        r->status = base[5];
+
+        if (msg_type == OBJM_MSG_RESPONSE) {
+            uint8_t tail[10];
+            if (recv_all(conn->fd, tail, sizeof(tail)) < 0) {
+                free(r);
+                set_error(conn, "Failed to receive response detail");
+                return -1;
+            }
+            r->content_len = be64toh(*(uint64_t *)(tail));
+            r->metadata_len = ntohs(*(uint16_t *)(tail + 8));
+        } else if (msg_type == OBJM_MSG_SEGMENTED_RESPONSE) {
+            if (!(conn->params.capabilities & OBJM_CAP_SEGMENTED_DELIVERY)) {
+                free(r);
+                set_error(conn, "Segmented response without capability");
+                return -1;
+            }
+
+            uint8_t tail[4];
+            if (recv_all(conn->fd, tail, sizeof(tail)) < 0) {
+                free(r);
+                set_error(conn, "Failed to receive segmented response detail");
+                return -1;
+            }
+            segment_count = ntohs(*(uint16_t *)(tail));
+            r->metadata_len = ntohs(*(uint16_t *)(tail + 2));
+            is_segmented = 1;
+        } else {
             free(r);
-            set_error(conn, "Unexpected message type: %d", header[0]);
+            set_error(conn, "Unexpected message type: %d", msg_type);
             return -1;
         }
-        
-        r->request_id = ntohl(*(uint32_t *)(header + 1));
-        r->status = header[5];
-        r->content_len = be64toh(*(uint64_t *)(header + 6));
-        r->metadata_len = ntohs(*(uint16_t *)(header + 14));
     }
-    
-    /* Receive metadata if present */
+
     if (r->metadata_len > 0) {
         r->metadata = malloc(r->metadata_len);
         if (!r->metadata) {
@@ -307,9 +612,14 @@ int objm_client_recv_response(objm_connection_t *conn, objm_response_t **resp) {
             return -1;
         }
     }
-    
-    /* Receive FD for FD pass mode */
-    if (r->status == OBJM_STATUS_OK && r->content_len == 0) {
+
+    if (is_segmented) {
+        if (recv_segmented_payload(conn, r, segment_count) < 0) {
+            free(r->metadata);
+            free(r);
+            return -1;
+        }
+    } else if (r->status == OBJM_STATUS_OK && r->content_len == 0) {
         r->fd = recv_fd(conn->fd);
         if (r->fd < 0) {
             free(r->metadata);
@@ -318,7 +628,7 @@ int objm_client_recv_response(objm_connection_t *conn, objm_response_t **resp) {
             return -1;
         }
     }
-    
+
     *resp = r;
     return 0;
 }
@@ -515,29 +825,44 @@ int objm_server_recv_request(objm_connection_t *conn, objm_request_t **req) {
         r->uri[r->uri_len] = '\0';
         
     } else {
-        /* V2: msg_type(1) + request_id(4) + flags(1) + mode(1) + uri_len(2) + uri */
-        uint8_t header[9];
+        /* V2: msg_type + request header */
+        uint8_t msg_type;
+        if (recv_all(conn->fd, &msg_type, sizeof(msg_type)) < 0) {
+            free(r);
+            return -1;
+        }
+
+        if (msg_type == OBJM_MSG_CLOSE) {
+            /* Consume reason byte to keep stream in sync */
+            uint8_t close_reason;
+            if (recv_all(conn->fd, &close_reason, sizeof(close_reason)) < 0) {
+                free(r);
+                return -1;
+            }
+
+            (void)close_reason;
+
+            free(r);
+            return 1;  /* Connection closing */
+        }
+
+        if (msg_type != OBJM_MSG_REQUEST) {
+            free(r);
+            set_error(conn, "Unexpected message type: %d", msg_type);
+            return -1;
+        }
+
+        /* request_id(4) + flags(1) + mode(1) + uri_len(2) */
+        uint8_t header[8];
         if (recv_all(conn->fd, header, sizeof(header)) < 0) {
             free(r);
             return -1;
         }
-        
-        /* Check for CLOSE message */
-        if (header[0] == OBJM_MSG_CLOSE) {
-            free(r);
-            return 1;  /* Connection closing */
-        }
-        
-        if (header[0] != OBJM_MSG_REQUEST) {
-            free(r);
-            set_error(conn, "Unexpected message type: %d", header[0]);
-            return -1;
-        }
-        
-        r->id = ntohl(*(uint32_t *)(header + 1));
-        r->flags = header[5];
-        r->mode = header[6];
-        r->uri_len = ntohs(*(uint16_t *)(header + 7));
+
+        r->id = ntohl(*(uint32_t *)(header + 0));
+        r->flags = header[4];
+        r->mode = header[5];
+        r->uri_len = ntohs(*(uint16_t *)(header + 6));
         
         if (r->uri_len > OBJM_MAX_URI_LEN) {
             free(r);
@@ -591,28 +916,54 @@ int objm_server_send_response(objm_connection_t *conn, const objm_response_t *re
         }
         
     } else {
-        /* V2: msg_type(1) + request_id(4) + status(1) + content_len(8) + metadata_len(2) */
-        uint8_t header[16];
-        header[0] = OBJM_MSG_RESPONSE;
-        *(uint32_t *)(header + 1) = htonl(resp->request_id);
-        header[5] = resp->status;
-        *(uint64_t *)(header + 6) = htobe64(resp->content_len);
-        *(uint16_t *)(header + 14) = htons(resp->metadata_len);
-        
-        if (send_all(conn->fd, header, sizeof(header)) < 0) {
-            return -1;
-        }
-        
-        if (resp->metadata_len > 0 && resp->metadata) {
-            if (send_all(conn->fd, resp->metadata, resp->metadata_len) < 0) {
+        if (resp->segment_count > 0 && resp->segments) {
+            if (!(conn->params.capabilities & OBJM_CAP_SEGMENTED_DELIVERY)) {
+                set_error(conn, "Peer lacks segmented delivery capability");
                 return -1;
             }
-        }
-        
-        /* Send FD if FD pass mode */
-        if (resp->status == OBJM_STATUS_OK && resp->fd >= 0) {
-            if (send_fd(conn->fd, resp->fd) < 0) {
+
+            uint8_t header[10];
+            header[0] = OBJM_MSG_SEGMENTED_RESPONSE;
+            *(uint32_t *)(header + 1) = htonl(resp->request_id);
+            header[5] = resp->status;
+            *(uint16_t *)(header + 6) = htons(resp->segment_count);
+            *(uint16_t *)(header + 8) = htons(resp->metadata_len);
+
+            if (send_all(conn->fd, header, sizeof(header)) < 0) {
                 return -1;
+            }
+
+            if (resp->metadata_len > 0 && resp->metadata) {
+                if (send_all(conn->fd, resp->metadata, resp->metadata_len) < 0) {
+                    return -1;
+                }
+            }
+
+            if (send_segmented_payload(conn, resp) < 0) {
+                return -1;
+            }
+        } else {
+            uint8_t header[16];
+            header[0] = OBJM_MSG_RESPONSE;
+            *(uint32_t *)(header + 1) = htonl(resp->request_id);
+            header[5] = resp->status;
+            *(uint64_t *)(header + 6) = htobe64(resp->content_len);
+            *(uint16_t *)(header + 14) = htons(resp->metadata_len);
+
+            if (send_all(conn->fd, header, sizeof(header)) < 0) {
+                return -1;
+            }
+
+            if (resp->metadata_len > 0 && resp->metadata) {
+                if (send_all(conn->fd, resp->metadata, resp->metadata_len) < 0) {
+                    return -1;
+                }
+            }
+
+            if (resp->status == OBJM_STATUS_OK && resp->fd >= 0) {
+                if (send_fd(conn->fd, resp->fd) < 0) {
+                    return -1;
+                }
             }
         }
     }
@@ -702,6 +1053,9 @@ void objm_request_free(objm_request_t *req) {
 
 void objm_response_free(objm_response_t *resp) {
     if (!resp) return;
+    if (resp->segments) {
+        free_segments(resp->segments, resp->segment_count);
+    }
     if (resp->fd >= 0) {
         close(resp->fd);
     }
@@ -923,34 +1277,67 @@ const char *objm_mode_name(char mode) {
         case OBJM_MODE_FDPASS: return "FD_PASS";
         case OBJM_MODE_COPY: return "COPY";
         case OBJM_MODE_SPLICE: return "SPLICE";
+        case OBJM_MODE_SEGMENTED: return "SEGMENTED";
         default: return "UNKNOWN";
     }
 }
 
+const char *objm_last_error(const objm_connection_t *conn) {
+    if (!conn || conn->error[0] == '\0') {
+        return NULL;
+    }
+    return conn->error;
+}
+
 int objm_capability_names(uint16_t capabilities, char *buffer, size_t size) {
-    int written = 0;
+    static const struct {
+        uint16_t bit;
+        const char *name;
+    } cap_table[] = {
+        {OBJM_CAP_OOO_REPLIES, "OOO_REPLIES"},
+        {OBJM_CAP_PIPELINING, "PIPELINING"},
+        {OBJM_CAP_COMPRESSION, "COMPRESSION"},
+        {OBJM_CAP_MULTIPLEXING, "MULTIPLEXING"},
+        {OBJM_CAP_SEGMENTED_DELIVERY, "SEGMENTED"},
+    };
+
+    size_t written = 0;
     int first = 1;
-    
-    if (capabilities & OBJM_CAP_OOO_REPLIES) {
-        written += snprintf(buffer + written, size - written, 
-                           "%sOOO_REPLIES", first ? "" : "|");
+
+    for (size_t i = 0; i < sizeof(cap_table) / sizeof(cap_table[0]); i++) {
+        if (!(capabilities & cap_table[i].bit)) {
+            continue;
+        }
+
+        size_t remaining = (size > written) ? (size - written) : 0;
+        int ret = snprintf(buffer + written, remaining,
+                           "%s%s", first ? "" : "|", cap_table[i].name);
+        if (ret < 0) {
+            return (int)written;
+        }
+        if ((size_t)ret >= remaining) {
+            written = size;
+        } else {
+            written += (size_t)ret;
+        }
         first = 0;
     }
-    if (capabilities & OBJM_CAP_PIPELINING) {
-        written += snprintf(buffer + written, size - written,
-                           "%sPIPELINING", first ? "" : "|");
-        first = 0;
+
+    if ((capabilities & OBJM_CAP_SEGMENTED_DELIVERY) && size > 0) {
+        if (!strstr(buffer, "SEGMENTED")) {
+            size_t len = (written < size) ? written : size - 1;
+            size_t remaining = (size > len) ? (size - len) : 0;
+            int ret = snprintf(buffer + len, remaining, "%sSEGMENTED",
+                               (len > 0) ? "|" : "");
+            if (ret > 0) {
+                written = len + (size_t)ret;
+            }
+        }
     }
-    if (capabilities & OBJM_CAP_COMPRESSION) {
-        written += snprintf(buffer + written, size - written,
-                           "%sCOMPRESSION", first ? "" : "|");
-        first = 0;
+
+    if (first && size > 0) {
+        buffer[0] = '\0';
     }
-    if (capabilities & OBJM_CAP_MULTIPLEXING) {
-        written += snprintf(buffer + written, size - written,
-                           "%sMULTIPLEXING", first ? "" : "|");
-        first = 0;
-    }
-    
-    return written;
+
+    return (int)written;
 }

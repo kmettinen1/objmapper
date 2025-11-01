@@ -38,10 +38,10 @@ $(LIB_SHARED): $(LIB_OBJ)
 examples: $(EXAMPLE_CLIENT) $(EXAMPLE_SERVER)
 
 $(EXAMPLE_CLIENT): ../../examples/example_client.c $(LIB_STATIC)
-	$(CC) $(CFLAGS) $< -L. -lobmprotocol -o $@
+	$(CC) $(CFLAGS) $< $(LIB_STATIC) -o $@
 
 $(EXAMPLE_SERVER): ../../examples/example_server.c $(LIB_STATIC)
-	$(CC) $(CFLAGS) $< -L. -lobmprotocol -o $@
+	$(CC) $(CFLAGS) $< $(LIB_STATIC) -o $@
 
 # Install
 install: $(LIB_STATIC) $(LIB_SHARED)

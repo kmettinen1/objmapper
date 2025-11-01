@@ -33,6 +33,7 @@ extern "C" {
 #define OBJM_CAP_PIPELINING     0x0002  /* Can send pipelined requests */
 #define OBJM_CAP_COMPRESSION    0x0004  /* Reserved for future */
 #define OBJM_CAP_MULTIPLEXING   0x0008  /* Reserved for future */
+#define OBJM_CAP_SEGMENTED_DELIVERY 0x0010 /* Supports mixed segment responses */
 
 /* Request flags */
 #define OBJM_REQ_ORDERED   0x01  /* Force in-order response */
@@ -43,6 +44,7 @@ extern "C" {
 #define OBJM_MSG_RESPONSE   0x02
 #define OBJM_MSG_CLOSE      0x03
 #define OBJM_MSG_CLOSE_ACK  0x04
+#define OBJM_MSG_SEGMENTED_RESPONSE 0x05
 
 /* Status codes */
 #define OBJM_STATUS_OK              0x00
@@ -70,6 +72,7 @@ extern "C" {
 #define OBJM_MODE_FDPASS '1'
 #define OBJM_MODE_COPY   '2'
 #define OBJM_MODE_SPLICE '3'
+#define OBJM_MODE_SEGMENTED '4'
 
 /* Metadata types */
 #define OBJM_META_SIZE      0x01  /* File size (8 bytes) */
@@ -79,6 +82,7 @@ extern "C" {
 #define OBJM_META_BACKEND   0x05  /* Backend path ID (1 byte) */
 #define OBJM_META_LATENCY   0x06  /* Processing latency (4 bytes, μs) */
 #define OBJM_META_PAYLOAD   0x07  /* Payload descriptor blob */
+#define OBJM_META_SEGMENT_HINTS 0x08 /* Segment prefetch hints */
 
 /* Close reasons */
 #define OBJM_CLOSE_NORMAL    0x00
@@ -119,6 +123,31 @@ typedef struct {
     size_t uri_len;        /* URI length */
 } objm_request_t;
 
+/* Segment encoding ------------------------------------------------------- */
+
+#define OBJM_SEGMENT_HEADER_WIRE_SIZE 32U
+#define OBJM_MAX_SEGMENTS 64U
+
+#define OBJM_SEG_TYPE_INLINE 0U
+#define OBJM_SEG_TYPE_FD     1U
+#define OBJM_SEG_TYPE_SPLICE 2U
+
+#define OBJM_SEG_FLAG_FIN       0x01
+#define OBJM_SEG_FLAG_REUSE_FD  0x02
+#define OBJM_SEG_FLAG_OPTIONAL  0x04
+
+typedef struct {
+    uint8_t type;            /* OBJM_SEG_TYPE_* */
+    uint8_t flags;           /* OBJM_SEG_FLAG_* */
+    uint32_t copy_length;    /* Bytes of inline payload */
+    uint64_t logical_length; /* Bytes contributed to client body */
+    uint64_t storage_offset; /* Offset within referenced FD */
+    uint64_t storage_length; /* Bytes available from FD */
+    uint8_t *inline_data;    /* Inline bytes (type INLINE) */
+    int fd;                  /* FD/SPLICE segment handle */
+    int owns_fd;             /* Close FD during response_free */
+} objm_segment_t;
+
 /**
  * Response handle
  */
@@ -126,6 +155,8 @@ typedef struct {
     uint32_t request_id;   /* Matching request ID */
     uint8_t status;        /* Status code */
     int fd;                /* File descriptor (for FD pass mode, -1 otherwise) */
+    objm_segment_t *segments; /* Segments for segmented delivery */
+    uint16_t segment_count;   /* Number of active segments */
     size_t content_len;    /* Content length (for copy/splice modes) */
     uint8_t *metadata;     /* Optional metadata (caller must free) */
     size_t metadata_len;   /* Metadata length */
@@ -487,6 +518,14 @@ const char *objm_mode_name(char mode);
  * @return Number of bytes written
  */
 int objm_capability_names(uint16_t capabilities, char *buffer, size_t size);
+
+/**
+ * Retrieve last error message
+ *
+ * @param conn Connection handle
+ * @return Error string or NULL
+ */
+const char *objm_last_error(const objm_connection_t *conn);
 
 #ifdef __cplusplus
 }

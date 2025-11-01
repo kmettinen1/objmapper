@@ -87,15 +87,16 @@ Total: 9 bytes
 #define OBJM_CAP_PIPELINING     0x0002  // Can send pipelined requests
 #define OBJM_CAP_COMPRESSION    0x0004  // Reserved for future
 #define OBJM_CAP_MULTIPLEXING   0x0008  // Reserved for future
+#define OBJM_CAP_SEGMENTED_DELIVERY 0x0010 // Supports segmented responses
 ```
 
 **Example:**
 ```c
-// Client supports OOO and pipelining, max 16 concurrent requests
+// Client supports OOO, pipelining, segmented delivery; max 16 concurrent requests
 uint8_t hello[9] = {
     'O', 'B', 'J', 'M',    // Magic
     0x02,                   // Version 2
-    0x03, 0x00,            // Capabilities: OOO | PIPELINING
+    0x13, 0x00,            // Capabilities: OOO | PIPELINING | SEGMENTED
     0x10, 0x00             // Max pipeline depth: 16
 };
 ```
@@ -122,6 +123,18 @@ uint8_t hello[9] = {
 │   0 = serialized, N = parallel          │
 └─────────────────────────────────────────┘
 Total: 6 bytes
+```
+
+### Message Types
+
+```
+Value  Description
+-----  --------------------------------------------------
+0x01   REQUEST (V2 request framing)
+0x02   RESPONSE (copy/splice/FD pass payloads)
+0x03   CLOSE
+0x04   CLOSE_ACK
+0x05   SEGMENTED_RESPONSE (mixed inline/FD segments)
 ```
 
 **Negotiated Capabilities:**
